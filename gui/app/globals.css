@@ -405,3 +405,530 @@ pre {
   font-size: 12px;
   text-align: center;
 }
+
+/* --- v0.2 additions --- */
+
+/* Filter bar on the logs page. */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+  padding: 16px;
+  margin: 16px 0 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.filters label {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.filters input,
+.filters select {
+  margin-top: 4px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  min-width: 160px;
+}
+.filters .toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.filters .toggle input {
+  margin-top: 0;
+  min-width: 0;
+}
+.filters button {
+  padding: 8px 16px;
+  background: var(--surface-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+}
+.filters button:hover {
+  border-color: var(--fg-muted);
+}
+
+/* Live refresh status bar above the table. */
+.live-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--fg-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.dot-live {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.6);
+  animation: livepulse 1.6s ease-in-out infinite;
+}
+@keyframes livepulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+.dot-down {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+}
+
+.drop-badge {
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--error);
+  border: 1px solid var(--error);
+  font-size: 11px;
+  font-family: var(--mono);
+}
+
+.account-actions {
+  display: inline-flex;
+  gap: 12px;
+  align-items: center;
+  margin: 16px 0;
+}
+
+.bulk-rotation-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0;
+}
+.bulk-rotation-list li {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.bulk-rotation-list li:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* Right-aligned numeric columns. */
+.cost-table th.right,
+.cost-table td.right {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cost totals row of tiles. */
+.cost-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin: 16px 0 24px;
+}
+.cost-tile {
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.cost-tile dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+}
+.cost-tile dd {
+  margin: 4px 0 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+.cost-tile-headline {
+  border-color: #6366f1;
+}
+
+/* Log detail meta grid. */
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 16px 0 24px;
+}
+.meta-grid > div {
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.meta-grid dt {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.meta-grid dd {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+.json-block {
+  padding: 14px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+/* Audit table — colored badges by event category. */
+.badge-info { background: #1e3a8a; color: #c7d2fe; }
+.badge-warn { background: #7c2d12; color: #fed7aa; }
+.badge-ok   { background: #14532d; color: #bbf7d0; }
+.badge-muted { background: var(--surface-2); color: var(--fg-muted); }
+
+.audit-details {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+}
+.audit-details .kv .k {
+  color: var(--fg-muted);
+}
+.audit-details .kv .v {
+  color: var(--fg);
+}
+
+.banner-warn {
+  background: #422006;
+  border-color: #b45309;
+  color: #fde68a;
+  padding: 12px 16px;
+  border-radius: 6px;
+  margin: 16px 0;
+}
+
+.section-title {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  margin: 24px 0 8px;
+}
+
+/* --- v0.3 admin console --- */
+
+.header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pill-muted {
+  color: var(--fg-muted);
+  text-decoration: none;
+}
+.pill-muted .dot {
+  background: var(--fg-muted);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--fg);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+.btn:hover {
+  border-color: var(--fg-muted);
+}
+.btn-primary {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #fff;
+}
+.btn-primary:hover {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+.btn-danger {
+  background: transparent;
+  border-color: var(--error);
+  color: var(--error);
+}
+.btn-danger:hover {
+  background: var(--error-bg);
+}
+.btn-xsmall {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.inline-form {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  margin: 16px 0 20px;
+  flex-wrap: wrap;
+}
+.inline-form input[type="text"],
+.inline-form input:not([type]),
+.inline-form input[name] {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  min-width: 180px;
+}
+.inline-form select {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+}
+
+form.inline {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+form.inline select {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+}
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  vertical-align: middle;
+}
+.data-table th {
+  color: var(--fg-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.banner-ok {
+  background: rgba(74, 222, 128, 0.08);
+  border-color: var(--ok);
+  color: var(--ok);
+  padding: 14px 16px;
+  border-radius: 8px;
+  margin-bottom: 24px;
+  border-width: 1px;
+  border-style: solid;
+}
+
+.login-wrap {
+  max-width: 520px;
+  margin: 0 auto;
+}
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 20px 0;
+}
+.login-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+.login-form input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.plaintext-box {
+  margin: 10px 0;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  word-break: break-all;
+}
+
+/* --- config editor --- */
+
+.editor-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.editor-meta {
+  font-size: 12px;
+}
+
+.editor-grid {
+  display: flex;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 13px;
+  min-height: 460px;
+}
+
+.editor-gutter {
+  margin: 0;
+  padding: 14px 12px;
+  background: var(--surface);
+  color: var(--fg-muted);
+  text-align: right;
+  user-select: none;
+  border-right: 1px solid var(--border);
+  min-width: 48px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.editor-textarea {
+  flex: 1;
+  margin: 0;
+  padding: 14px 16px;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  outline: none;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  min-height: 460px;
+  tab-size: 2;
+}
+
+.editor-errors ul {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+.editor-errors li {
+  margin-bottom: 8px;
+}
+.editor-errors code {
+  color: inherit;
+  background: rgba(248, 113, 113, 0.12);
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+/* --- pipeline DAG viewer --- */
+
+.pipeline-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 0 20px;
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
+.dag-wrap {
+  overflow-x: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 24px;
+}
+.dag-empty {
+  padding: 24px;
+  background: var(--surface-2);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--fg-muted);
+  margin-bottom: 24px;
+}
+.dag-edges path {
+  stroke: var(--fg-muted);
+  stroke-width: 1.5;
+  color: var(--fg-muted);
+}
+.dag-node-rect {
+  fill: var(--surface);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+.dag-node-id {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  fill: var(--fg);
+}
+.dag-node-ref {
+  font-family: var(--mono);
+  font-size: 11px;
+  fill: var(--fg-muted);
+}
+.dag-when {
+  font-size: 10px;
+  fill: var(--fg-muted);
+  font-family: var(--mono);
+}

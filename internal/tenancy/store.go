@@ -26,6 +26,36 @@ type Store interface {
 	CreateAPIKey(ctx context.Context, tenantID, name string, role Role) (*NewAPIKeyResult, error)
 	ListAPIKeys(ctx context.Context, tenantID string) ([]*APIKey, error)
 	DeleteAPIKey(ctx context.Context, id string) error
+	// RotateAPIKey atomically regenerates the secret behind an
+	// existing key. The id, name, role, and tenant_id are preserved
+	// so every caller that still holds the key id (audit events,
+	// CI configs that reference by id, etc.) keeps working — only
+	// the plaintext changes. The returned NewAPIKeyResult carries
+	// the previous prefix in its Key.Prefix-less variant so audit
+	// logs can correlate a rotation with the specific secret that
+	// was burned. The auth cache is flushed on success so cached
+	// Principals cannot outlive the old hash.
+	RotateAPIKey(ctx context.Context, id string) (result *NewAPIKeyResult, oldPrefix string, err error)
+	// BulkRotateTenantKeys atomically regenerates every key in a
+	// tenant inside a single database transaction. Returns one
+	// NewAPIKeyResult per key plus a parallel slice of old prefixes
+	// so audit logs can correlate each rotation with the specific
+	// secret that was burned. A tenant with zero keys is a no-op
+	// that returns empty slices (no error). On any per-key failure
+	// the transaction is rolled back and NONE of the keys are
+	// rotated — this is the whole point of a bulk operation: it
+	// runs all-or-nothing so operators responding to a suspected
+	// compromise don't end up with a mix of rotated and
+	// unrotated credentials.
+	// BulkRotateTenantKeys atomically regenerates every key in a
+	// tenant inside a single database transaction. Optional
+	// excludeKeyIDs lets the caller preserve specific keys (e.g.
+	// the caller's own credential when invoked with ?except=self).
+	BulkRotateTenantKeys(ctx context.Context, tenantID string, excludeKeyIDs ...string) (results []*NewAPIKeyResult, oldPrefixes []string, err error)
+	// UpdateAPIKeyRole atomically promotes or demotes a key. Returns
+	// the previous role alongside the new one so callers (and the
+	// audit recorder) can log the transition without a second read.
+	UpdateAPIKeyRole(ctx context.Context, id string, role Role) (prev Role, new Role, err error)
 
 	// Resolve looks up an API key by its plaintext value, verifies the
 	// bcrypt hash, bumps last_used, and returns the derived Principal.
@@ -57,8 +87,12 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(prefix);
 `
 
 // SQLiteStore implements Store against a pure-Go SQLite driver.
+// authCache is optional and only installed after EnableAuthCache is
+// called; the zero-value store behaves exactly like v0.1 and runs
+// bcrypt on every Resolve call.
 type SQLiteStore struct {
-	db *sql.DB
+	db    *sql.DB
+	cache *authCache
 }
 
 // NewSQLiteStore opens or creates the tenancy database at the given path.
@@ -74,6 +108,19 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("apply tenancy schema: %w", err)
 	}
 	return &SQLiteStore{db: db}, nil
+}
+
+// EnableAuthCache installs a bounded TTL cache in front of the
+// bcrypt compare in Resolve. The cache is keyed on sha256(plaintext)
+// so no plaintext is retained, and is flushed whenever any
+// mutation (key delete, role change) runs.
+//
+// Returns the receiver so callers can chain it in NewSQLiteStore
+// wiring: `store := (&SQLiteStore{...}).EnableAuthCache(...)`.
+// Passing ttl <= 0 uses 5 minutes; maxSize <= 0 uses 1024.
+func (s *SQLiteStore) EnableAuthCache(ttl time.Duration, maxSize int) *SQLiteStore {
+	s.cache = newAuthCache(ttl, maxSize)
+	return s
 }
 
 // Close releases the underlying database handle.
@@ -166,6 +213,10 @@ func (s *SQLiteStore) DeleteTenant(ctx context.Context, id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	// ON DELETE CASCADE wipes the tenant's api_keys rows; flush the
+	// auth cache so cached Principals from the deleted tenant cannot
+	// authenticate past the TTL.
+	s.cache.Invalidate()
 	return nil
 }
 
@@ -235,7 +286,233 @@ func (s *SQLiteStore) ListAPIKeys(ctx context.Context, tenantID string) ([]*APIK
 	return out, rows.Err()
 }
 
-// DeleteAPIKey permanently removes a key.
+// UpdateAPIKeyRole atomically changes an existing key's role. It
+// returns ErrNotFound when the key id does not exist and a validation
+// error when the requested role is not one of viewer/editor/admin.
+// The previous role is returned on success so the caller can log a
+// transition (viewer -> admin, etc.) without a second query.
+func (s *SQLiteStore) UpdateAPIKeyRole(ctx context.Context, id string, role Role) (Role, Role, error) {
+	if !role.IsValid() {
+		return "", "", fmt.Errorf("invalid role %q", role)
+	}
+	var prev string
+	err := s.db.QueryRowContext(ctx, `SELECT role FROM api_keys WHERE id = ?`, id).Scan(&prev)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", ErrNotFound
+		}
+		return "", "", err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE api_keys SET role = ? WHERE id = ?`, string(role), id); err != nil {
+		return "", "", err
+	}
+	// Flush the auth cache so a previously cached Principal for this
+	// key cannot linger with the old role past the change.
+	s.cache.Invalidate()
+	return Role(prev), role, nil
+}
+
+// RotateAPIKey regenerates the secret for an existing key without
+// changing its id, name, role, or tenant_id. Returns the new
+// plaintext alongside the prefix the old secret was using so the
+// caller can emit an audit trail that correlates the rotation with
+// the specific compromised credential.
+//
+// Implementation note: the operation is performed inside a SQLite
+// transaction so a crash or context cancellation cannot leave the
+// row with a broken hash/prefix pair.
+func (s *SQLiteStore) RotateAPIKey(ctx context.Context, id string) (*NewAPIKeyResult, string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	defer tx.Rollback() //nolint:errcheck // best-effort on error path
+
+	// Read existing row so we can preserve the immutable fields and
+	// surface the old prefix back to the caller for audit purposes.
+	var (
+		tenantID    string
+		name        string
+		oldPrefix   string
+		role        string
+		createdStr  string
+		lastUsedStr sql.NullString
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT tenant_id, name, prefix, role, created_at, last_used
+		 FROM api_keys WHERE id = ?`, id,
+	).Scan(&tenantID, &name, &oldPrefix, &role, &createdStr, &lastUsedStr)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, "", ErrNotFound
+		}
+		return nil, "", err
+	}
+
+	plaintext, newPrefix, err := generateAPIKey()
+	if err != nil {
+		return nil, "", err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, "", fmt.Errorf("bcrypt hash: %w", err)
+	}
+	// Reset last_used — a rotated key has no prior usage of its
+	// new plaintext, and preserving the timestamp would confuse
+	// "when did this credential last work?" investigations.
+	_, err = tx.ExecContext(ctx,
+		`UPDATE api_keys SET prefix = ?, hash = ?, last_used = NULL WHERE id = ?`,
+		newPrefix, string(hash), id,
+	)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, "", err
+	}
+
+	// Flush the auth cache so the old plaintext cannot resolve to
+	// a cached Principal after the rotation commits.
+	s.cache.Invalidate()
+
+	created, _ := time.Parse(time.RFC3339, createdStr)
+	key := APIKey{
+		ID:        id,
+		TenantID:  tenantID,
+		Name:      name,
+		Prefix:    newPrefix,
+		Role:      Role(role),
+		CreatedAt: created,
+	}
+	return &NewAPIKeyResult{Key: key, Plaintext: plaintext}, oldPrefix, nil
+}
+
+// BulkRotateTenantKeys rotates every key belonging to a tenant
+// inside a single SQLite transaction. On any per-key error the
+// whole transaction is rolled back so callers never end up with a
+// partially-rotated tenant (which would be the worst possible
+// state after a suspected credential compromise).
+//
+// The returned slices are parallel: results[i] and oldPrefixes[i]
+// describe the same key. Order matches the underlying SELECT's
+// ORDER BY created_at ASC so two calls on the same tenant produce
+// the same ordering, which helps audit-log correlation.
+func (s *SQLiteStore) BulkRotateTenantKeys(ctx context.Context, tenantID string, excludeKeyIDs ...string) ([]*NewAPIKeyResult, []string, error) {
+	// Fast-path existence check on the tenant itself so callers
+	// get a clean ErrNotFound instead of an empty-result on a
+	// typo.
+	if _, err := s.GetTenant(ctx, tenantID); err != nil {
+		return nil, nil, err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck // best-effort on error path
+
+	// Build the exclude set for the WHERE clause. When non-empty
+	// we add a NOT IN filter so the excluded keys survive the
+	// rotation unchanged — the caller typically passes their own
+	// key id so they don't lock themselves out.
+	excludeSet := make(map[string]struct{}, len(excludeKeyIDs))
+	for _, kid := range excludeKeyIDs {
+		if kid != "" {
+			excludeSet[kid] = struct{}{}
+		}
+	}
+	query := `SELECT id, name, prefix, role, created_at
+		 FROM api_keys WHERE tenant_id = ?`
+	args := []any{tenantID}
+	if len(excludeSet) > 0 {
+		placeholders := ""
+		for kid := range excludeSet {
+			if placeholders != "" {
+				placeholders += ", "
+			}
+			placeholders += "?"
+			args = append(args, kid)
+		}
+		query += " AND id NOT IN (" + placeholders + ")"
+	}
+	query += " ORDER BY created_at ASC"
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	type existing struct {
+		id, name, prefix, role, createdStr string
+	}
+	var existingKeys []existing
+	for rows.Next() {
+		var e existing
+		if err := rows.Scan(&e.id, &e.name, &e.prefix, &e.role, &e.createdStr); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		existingKeys = append(existingKeys, e)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, err
+	}
+	rows.Close()
+
+	// Empty tenant: valid, returns empty slices. We still commit
+	// the (empty) transaction for symmetry.
+	if len(existingKeys) == 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, nil
+	}
+
+	results := make([]*NewAPIKeyResult, 0, len(existingKeys))
+	oldPrefixes := make([]string, 0, len(existingKeys))
+
+	for _, e := range existingKeys {
+		plaintext, newPrefix, genErr := generateAPIKey()
+		if genErr != nil {
+			return nil, nil, genErr
+		}
+		hash, hashErr := bcrypt.GenerateFromPassword([]byte(plaintext), bcrypt.DefaultCost)
+		if hashErr != nil {
+			return nil, nil, fmt.Errorf("bcrypt hash: %w", hashErr)
+		}
+		if _, execErr := tx.ExecContext(ctx,
+			`UPDATE api_keys SET prefix = ?, hash = ?, last_used = NULL WHERE id = ?`,
+			newPrefix, string(hash), e.id,
+		); execErr != nil {
+			return nil, nil, execErr
+		}
+
+		created, _ := time.Parse(time.RFC3339, e.createdStr)
+		results = append(results, &NewAPIKeyResult{
+			Key: APIKey{
+				ID:        e.id,
+				TenantID:  tenantID,
+				Name:      e.name,
+				Prefix:    newPrefix,
+				Role:      Role(e.role),
+				CreatedAt: created,
+			},
+			Plaintext: plaintext,
+		})
+		oldPrefixes = append(oldPrefixes, e.prefix)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	// Flush the auth cache once at the end — every pre-rotation
+	// plaintext is now invalid, and any cached Principal would
+	// otherwise linger until its TTL expired.
+	s.cache.Invalidate()
+	return results, oldPrefixes, nil
+}
+
+// DeleteAPIKey permanently removes a key. The auth cache is flushed
+// on success so a cached Principal cannot outlive its backing row.
 func (s *SQLiteStore) DeleteAPIKey(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM api_keys WHERE id = ?`, id)
 	if err != nil {
@@ -245,12 +522,20 @@ func (s *SQLiteStore) DeleteAPIKey(ctx context.Context, id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	s.cache.Invalidate()
 	return nil
 }
 
 // Resolve looks up the key by prefix (cheap) and then verifies the
 // bcrypt hash against the plaintext (expensive). Updates last_used on
 // success so operators can spot orphaned keys.
+//
+// When the authCache is enabled (via EnableAuthCache) a successful
+// plaintext lookup inside the TTL window returns the previously
+// resolved Principal without touching the database or running
+// bcrypt, which is the single largest optimization available on the
+// authenticated hot path. Cache misses fall through to the original
+// prefix-query path unchanged.
 //
 // SQLite is configured with a single open connection, so we must fully
 // drain the SELECT into memory and close the Rows handle BEFORE running
@@ -260,6 +545,16 @@ func (s *SQLiteStore) Resolve(ctx context.Context, plaintext string) (*Principal
 	if len(plaintext) < 13 { // "mak_" + at least 9 chars
 		return nil, ErrInvalidKey
 	}
+
+	// Cache hit — skip bcrypt and the SELECT entirely. last_used is
+	// intentionally NOT bumped on cache hits: the tradeoff is that
+	// an always-hot key will appear stale in the admin console, but
+	// auth latency is the dominant operator concern and the counter
+	// self-corrects whenever the cache entry expires.
+	if cached := s.cache.Get(plaintext); cached != nil {
+		return cached, nil
+	}
+
 	prefix := plaintext[:12]
 
 	type candidate struct {
@@ -295,7 +590,9 @@ func (s *SQLiteStore) Resolve(ctx context.Context, plaintext string) (*Principal
 				`UPDATE api_keys SET last_used = ? WHERE id = ?`,
 				time.Now().UTC().Format(time.RFC3339), c.id,
 			)
-			return &Principal{TenantID: c.tenantID, KeyID: c.id, Role: Role(c.role)}, nil
+			principal := &Principal{TenantID: c.tenantID, KeyID: c.id, Role: Role(c.role)}
+			s.cache.Set(plaintext, principal)
+			return principal, nil
 		}
 	}
 	return nil, ErrInvalidKey

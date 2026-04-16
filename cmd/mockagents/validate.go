@@ -43,7 +43,10 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		paths = []string{agentsDir}
 	}
 
-	var allResults []*config.LoadResult
+	var allAgentResults []*config.LoadResult
+	var allPipelineResults []*config.PipelineLoadResult
+	var allTestSuiteResults []*config.TestSuiteLoadResult
+	var allMCPServerResults []*config.MCPServerLoadResult
 	var allLoadErrors []error
 
 	for _, p := range paths {
@@ -60,25 +63,81 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		}
 
 		if info.IsDir() {
-			results, errs := config.LoadDir(absPath)
-			allResults = append(allResults, results...)
+			// LoadAllDocuments returns every kind — agents,
+			// pipelines, testsuites, and mcp servers. We run the
+			// matching validator against each bucket.
+			docs, errs := config.LoadAllDocuments(absPath)
+			if docs != nil {
+				allAgentResults = append(allAgentResults, docs.Agents...)
+				allPipelineResults = append(allPipelineResults, docs.Pipelines...)
+				allTestSuiteResults = append(allTestSuiteResults, docs.TestSuites...)
+				allMCPServerResults = append(allMCPServerResults, docs.MCPServers...)
+			}
 			allLoadErrors = append(allLoadErrors, errs...)
 		} else {
+			// Single-file mode: dispatch on kind by trying each
+			// loader in turn. LoadFile only accepts Agents so we
+			// fall back through the other three loaders before
+			// surfacing the original error.
 			result, err := config.LoadFile(absPath)
-			if err != nil {
-				allLoadErrors = append(allLoadErrors, err)
-			} else {
-				allResults = append(allResults, result)
+			if err == nil {
+				allAgentResults = append(allAgentResults, result)
+				continue
 			}
+			if pipelineResult, perr := config.LoadPipelineFile(absPath); perr == nil {
+				allPipelineResults = append(allPipelineResults, pipelineResult)
+				continue
+			}
+			if suiteResult, serr := config.LoadTestSuiteFile(absPath); serr == nil {
+				allTestSuiteResults = append(allTestSuiteResults, suiteResult)
+				continue
+			}
+			if mcpResult, merr := config.LoadMCPServerFile(absPath); merr == nil {
+				allMCPServerResults = append(allMCPServerResults, mcpResult)
+				continue
+			}
+			allLoadErrors = append(allLoadErrors, err)
 		}
 	}
 
 	var allValidationErrors []*config.ValidationError
 	validator := &config.Validator{}
 
-	for _, result := range allResults {
+	for _, result := range allAgentResults {
 		config.ApplyDefaults(result.Definition)
 		if errList := validator.Validate(result.Definition, result.FilePath, result.Node); errList != nil {
+			allValidationErrors = append(allValidationErrors, errList.Errors...)
+		}
+	}
+	for _, result := range allPipelineResults {
+		if errList := config.ValidatePipeline(result.Definition, result.FilePath, result.Node); errList != nil {
+			allValidationErrors = append(allValidationErrors, errList.Errors...)
+		}
+	}
+	for _, result := range allTestSuiteResults {
+		if errList := config.ValidateTestSuite(result.Definition, result.FilePath, result.Node); errList != nil {
+			allValidationErrors = append(allValidationErrors, errList.Errors...)
+		}
+	}
+	for _, result := range allMCPServerResults {
+		if errList := config.ValidateMCPServer(result.Definition, result.FilePath, result.Node); errList != nil {
+			allValidationErrors = append(allValidationErrors, errList.Errors...)
+		}
+	}
+
+	// Cross-document reference checks: every pipeline's agent refs
+	// and every testsuite's target must resolve against the other
+	// documents in the same run. Skipped entirely when no pipelines
+	// or testsuites were loaded — pure agent directories don't
+	// need the extra pass.
+	if len(allPipelineResults) > 0 || len(allTestSuiteResults) > 0 {
+		crossDocs := &config.Documents{
+			Agents:     allAgentResults,
+			Pipelines:  allPipelineResults,
+			TestSuites: allTestSuiteResults,
+			MCPServers: allMCPServerResults,
+		}
+		if errList := config.ValidateDocuments(crossDocs); errList != nil {
 			allValidationErrors = append(allValidationErrors, errList.Errors...)
 		}
 	}
@@ -92,7 +151,8 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		format = config.ErrorFormatText
 	}
 
-	totalFiles := len(allResults) + len(allLoadErrors)
+	totalFiles := len(allAgentResults) + len(allPipelineResults) +
+		len(allTestSuiteResults) + len(allMCPServerResults) + len(allLoadErrors)
 	hasErrors := len(allLoadErrors) > 0 || len(allValidationErrors) > 0
 
 	// Print load errors.

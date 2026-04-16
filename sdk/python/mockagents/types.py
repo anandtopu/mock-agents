@@ -96,6 +96,38 @@ class TokenUsage:
 
 
 @dataclass
+class StreamChunk:
+    """A protocol-agnostic chunk of a streamed completion.
+
+    Both OpenAI Chat Completions and Anthropic Messages stream events
+    are normalized into this shape by ``MockAgentClient.iter_stream``,
+    so user code can iterate a stream the same way regardless of which
+    provider the mock is impersonating.
+
+    Attributes:
+        text: Incremental text delta. Empty string for non-text events.
+        tool_call_delta: ``(index, name, arguments_fragment)`` triple
+            when the event carries a partial tool call. ``None``
+            otherwise. ``arguments_fragment`` is the raw JSON fragment
+            as the provider streams it; callers that need the parsed
+            arguments should wait for ``finished`` and use
+            ``ChatResponse.tool_calls`` from a non-streamed call, or
+            accumulate the fragments themselves.
+        finish_reason: Set on the final chunk only. Empty otherwise.
+        finished: True on the terminal chunk so consumers can break
+            out of the loop without inspecting ``finish_reason``.
+        raw: The original event dict from the wire, for callers that
+            need provider-specific fields the normalization dropped.
+    """
+
+    text: str = ""
+    tool_call_delta: Optional[tuple[int, str, str]] = None
+    finish_reason: str = ""
+    finished: bool = False
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class Interaction:
     """A single request-response interaction with the mock server."""
 

@@ -114,6 +114,236 @@ func (h *TenancyHandlers) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, result)
 }
 
+// UpdateAPIKeyRoleRequest is the JSON body accepted by PATCH /api/v1/keys/{id}.
+type UpdateAPIKeyRoleRequest struct {
+	Role tenancy.Role `json:"role"`
+}
+
+// UpdateAPIKeyRole handles PATCH /api/v1/keys/{id} — admin only.
+// Promotes or demotes an existing key and records the transition to
+// the audit log so every privilege escalation leaves a trail.
+func (h *TenancyHandlers) UpdateAPIKeyRole(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req UpdateAPIKeyRoleRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+		return
+	}
+	if !req.Role.IsValid() {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid role (must be viewer, editor, or admin)"})
+		return
+	}
+	prev, next, err := h.Store.UpdateAPIKeyRole(r.Context(), id, req.Role)
+	if err != nil {
+		if errors.Is(err, tenancy.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "api key not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	h.Recorder.RecordHTTP(r, audit.EventAPIKeyRoleChanged, id,
+		audit.MarshalDetails(map[string]any{
+			"from": string(prev),
+			"to":   string(next),
+		}))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":   id,
+		"role": string(next),
+	})
+}
+
+// RotateAPIKey handles POST /api/v1/keys/{id}/rotate — admin only.
+// Returns a NewAPIKeyResult with the fresh plaintext secret; the
+// previous prefix is recorded in the audit trail so operators can
+// correlate a rotation with a specific compromised credential.
+func (h *TenancyHandlers) RotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	result, oldPrefix, err := h.Store.RotateAPIKey(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, tenancy.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "api key not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	h.Recorder.RecordHTTP(r, audit.EventAPIKeyRotated, result.Key.ID,
+		audit.MarshalDetails(map[string]any{
+			"tenant_id":  result.Key.TenantID,
+			"name":       result.Key.Name,
+			"role":       string(result.Key.Role),
+			"old_prefix": oldPrefix,
+			"new_prefix": result.Key.Prefix,
+		}))
+	writeJSON(w, http.StatusOK, result)
+}
+
+// BulkRotateResult is the wire shape returned by BulkRotateTenantKeys.
+// Thin wrapper that adds the `count` aggregate so callers can
+// confirm how many keys were touched without counting the array
+// themselves.
+type BulkRotateResult struct {
+	Count   int                         `json:"count"`
+	Results []*tenancy.NewAPIKeyResult  `json:"results"`
+}
+
+// BulkRotateTenantKeys handles POST /api/v1/tenants/{id}/keys/rotate
+// — admin only. Rotates every key in the tenant inside a single
+// database transaction, emits one `api_key.rotated` audit event per
+// key with `bulk: true` so operators can correlate the batch, and
+// returns the fresh plaintexts as an array.
+//
+// This is the operator's emergency response to a suspected
+// tenant-wide credential compromise: one click, every active
+// credential replaced, every old secret dead. The alternative
+// (admin clicks "Rotate" on every key one by one) leaves a
+// window where half the keys are still the compromised values.
+func (h *TenancyHandlers) BulkRotateTenantKeys(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.PathValue("id")
+	// ?except=self lets the caller preserve their own key so they
+	// don't lock themselves out of the very admin console they're
+	// using to respond to the compromise. The handler reads the
+	// caller's Principal from the context — the middleware already
+	// authenticated them, so the key id is trustworthy.
+	var excludeIDs []string
+	if r.URL.Query().Get("except") == "self" {
+		if principal := tenancy.PrincipalFrom(r.Context()); principal != nil && principal.KeyID != "" {
+			excludeIDs = append(excludeIDs, principal.KeyID)
+		}
+	}
+	results, oldPrefixes, err := h.Store.BulkRotateTenantKeys(r.Context(), tenantID, excludeIDs...)
+	if err != nil {
+		if errors.Is(err, tenancy.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "tenant not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// One audit entry per rotated key. Using the same event kind
+	// as individual rotations keeps the audit filter surface
+	// simple; the `bulk: true` detail distinguishes the two
+	// call sites for operators who want to grep for batches.
+	for i, res := range results {
+		h.Recorder.RecordHTTP(r, audit.EventAPIKeyRotated, res.Key.ID,
+			audit.MarshalDetails(map[string]any{
+				"tenant_id":  res.Key.TenantID,
+				"name":       res.Key.Name,
+				"role":       string(res.Key.Role),
+				"old_prefix": oldPrefixes[i],
+				"new_prefix": res.Key.Prefix,
+				"bulk":       true,
+			}))
+	}
+	writeJSON(w, http.StatusOK, BulkRotateResult{
+		Count:   len(results),
+		Results: results,
+	})
+}
+
+// RotateMyAPIKey handles POST /api/v1/keys/me/rotate — any
+// authenticated role. Reads the caller's key id from the request
+// context (set by the auth middleware) and regenerates the secret
+// in place. Unlike RotateAPIKey this does not require an admin
+// role because the caller can only rotate *their own* credential:
+// worst-case they've burned their own access and need to re-login,
+// which is exactly what they asked for. The audit event records
+// the old + new prefix just like the admin path.
+//
+// Returns 401 when the request is unauthenticated (single-tenant
+// mode does not install the auth middleware, so RotateMyAPIKey is
+// admin-only-callable via the other route there).
+func (h *TenancyHandlers) RotateMyAPIKey(w http.ResponseWriter, r *http.Request) {
+	principal := tenancy.PrincipalFrom(r.Context())
+	if principal == nil || principal.KeyID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "self-rotation requires an authenticated request",
+		})
+		return
+	}
+	result, oldPrefix, err := h.Store.RotateAPIKey(r.Context(), principal.KeyID)
+	if err != nil {
+		if errors.Is(err, tenancy.ErrNotFound) {
+			// The principal was authenticated but the underlying
+			// key is gone — race with DeleteAPIKey. Return 404 to
+			// mirror the admin path.
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "api key not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	h.Recorder.RecordHTTP(r, audit.EventAPIKeyRotated, result.Key.ID,
+		audit.MarshalDetails(map[string]any{
+			"tenant_id":  result.Key.TenantID,
+			"name":       result.Key.Name,
+			"role":       string(result.Key.Role),
+			"old_prefix": oldPrefix,
+			"new_prefix": result.Key.Prefix,
+			"self":       true,
+		}))
+	writeJSON(w, http.StatusOK, result)
+}
+
+// BurnMyAPIKey handles POST /api/v1/keys/me/burn — any
+// authenticated role. Rotates the caller's key in place exactly
+// like RotateMyAPIKey, but deliberately discards the new plaintext
+// instead of returning it. Responds with 204 No Content.
+//
+// Use case: operators who suspect the current browser session has
+// been compromised (e.g. somebody shoulder-surfed the cookie jar)
+// want to kill the session entirely — they do NOT want the new
+// plaintext anywhere near the compromised browser. Recovery goes
+// through an out-of-band channel (a different machine with an
+// admin credential minting a fresh key, or the CLI bootstrap
+// flow).
+//
+// The underlying secret is still generated and hashed via
+// RotateAPIKey so the caller's old plaintext is definitively
+// dead, the auth cache is flushed, and the audit trail records
+// the rotation — it just doesn't travel back over this HTTP
+// response. The audit event detail carries `burn: true` so
+// operators can correlate post-incident.
+func (h *TenancyHandlers) BurnMyAPIKey(w http.ResponseWriter, r *http.Request) {
+	principal := tenancy.PrincipalFrom(r.Context())
+	if principal == nil || principal.KeyID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "burn requires an authenticated request",
+		})
+		return
+	}
+	result, oldPrefix, err := h.Store.RotateAPIKey(r.Context(), principal.KeyID)
+	if err != nil {
+		if errors.Is(err, tenancy.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "api key not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	h.Recorder.RecordHTTP(r, audit.EventAPIKeyRotated, result.Key.ID,
+		audit.MarshalDetails(map[string]any{
+			"tenant_id":  result.Key.TenantID,
+			"name":       result.Key.Name,
+			"role":       string(result.Key.Role),
+			"old_prefix": oldPrefix,
+			"new_prefix": result.Key.Prefix,
+			"self":       true,
+			"burn":       true,
+		}))
+	// Zeroing the local reference is defense-in-depth — the
+	// plaintext is already out of scope as soon as we return, but
+	// explicit zero-then-nil makes the intent obvious for anyone
+	// reading the code later. The Go runtime may still keep a
+	// copy in the bcrypt scratch buffer, but that's the existing
+	// threat model (the regular RotateAPIKey path has the same
+	// concern).
+	result.Plaintext = ""
+	result = nil
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // DeleteAPIKey handles DELETE /api/v1/keys/{id} — admin only.
 func (h *TenancyHandlers) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

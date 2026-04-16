@@ -1,7 +1,6 @@
 package adapter
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -75,7 +74,7 @@ type AnthropicHandler struct {
 // HandleMessages handles POST /v1/messages.
 func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request) {
 	var req AnthropicRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("invalid JSON: %s", err))
 		return
 	}
@@ -106,7 +105,13 @@ func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request
 		Stream:    req.Stream,
 	}
 
-	resp, err := h.Engine.ProcessRequest(inbound)
+	// Optional tenant override — see openai.go for the rationale.
+	ctx := r.Context()
+	if tid := r.Header.Get("X-Mockagents-Tenant"); tid != "" {
+		ctx = engine.WithTenantID(ctx, tid)
+	}
+
+	resp, err := h.Engine.ProcessRequestContext(ctx, inbound)
 	if err != nil {
 		if ce := engine.AsChaosError(err); ce != nil {
 			if ce.RetryAfter > 0 {
@@ -123,6 +128,14 @@ func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request
 		}
 		writeAnthropicError(w, status, "invalid_request_error", err.Error())
 		return
+	}
+
+	// Stamp the matched agent onto the request meta so the
+	// InteractionCapture middleware can record the real agent name
+	// instead of probing the response body for a model name.
+	if meta := engine.RequestMetaFromContext(r.Context()); meta != nil {
+		meta.AgentName = resp.AgentName
+		meta.Model = req.Model
 	}
 
 	// Stream or JSON.

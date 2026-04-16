@@ -30,6 +30,21 @@ import (
 // MockAgents. Consumers can filter by this in their backend.
 const TracerName = "github.com/mockagents/mockagents"
 
+// tracingEnabled reports whether a real exporter is installed. The
+// default is false (noop provider) and the engine hot path checks this
+// flag before building span attributes, which is a measurable win: the
+// variadic `[]attribute.KeyValue` allocation + interface dispatch in
+// `otel.Tracer(...).Start(...)` is skipped entirely when the user is
+// not actively tracing.
+//
+// Read-only after NewTracerProvider returns.
+var tracingEnabled bool
+
+// IsEnabled reports whether tracing is actively exporting to a
+// configured backend. Hot-path callers should guard span construction
+// with this flag to avoid paying the noop cost per request.
+func IsEnabled() bool { return tracingEnabled }
+
 // Shutdown is returned by NewTracerProvider; call it once at program
 // exit to flush pending spans. A noop Shutdown is returned when the
 // provider is the noop provider.
@@ -72,6 +87,7 @@ func NewTracerProvider(ctx context.Context, serviceName, version string) (trace.
 	)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
+	tracingEnabled = true
 
 	return tp, tp.Shutdown, nil
 }

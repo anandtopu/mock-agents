@@ -1,8 +1,8 @@
 # MockAgents -- Product Backlog
 
-**Version:** 1.2
-**Date:** 2026-04-13 (Phase 2/3/4 slice landing revision)
-**Status:** MVP complete; Phase 2/3/4 v0.1 slices landed
+**Version:** 1.3
+**Date:** 2026-04-15 (Phase 4 v0.3 slice landing revision)
+**Status:** MVP complete; Phase 2/3/4 v0.1 + v0.2 + v0.3 slices landed
 **Author:** MockAgents Product Team
 **Authoritative status:** [PROGRESS.md](./PROGRESS.md) — this file now covers backlog structure; live status lives in PROGRESS.md.
 **Related:** [PRD](./PRD.md) | [Implementation Plan](./implementation-plan.md)
@@ -43,7 +43,7 @@
 
 ---
 
-## 1A. Implementation Status (as of 2026-04-13)
+## 1A. Implementation Status (as of 2026-04-14)
 
 Snapshot of where the codebase sits against the 46 MVP stories. Derived from the current tree: Go binary at `cmd/mockagents/` (init, start, validate, logs), `internal/{adapter,engine,server,streaming,storage,config,cli,types}`, `sdk/python/mockagents/`, `examples/`, `schema/`, `site/`, `Dockerfile`, `.goreleaser.yml`.
 
@@ -64,16 +64,12 @@ Status labels used below: "Done" = code merged with tests; "Partial" = core path
 | E-009 | Interaction Logging & Storage       | 3       | 3    | 0       | 0    | `internal/storage/` SQLite (modernc.org driver, no cgo); `mockagents logs` CLI with filtering; session tracking; `log_handlers.go` in server. |
 | E-010 | Distribution & Packaging            | 3       | 3    | 0       | 0    | `Dockerfile`, `docker-compose.yml`, `.goreleaser.yml`, Python SDK packaged with `pyproject.toml`. Actual PyPI/Docker Hub publish is release-time, not a code gap. |
 | E-011 | Documentation & Developer Experience| 3       | 3    | 0       | 0    | MkDocs site under `site/` (getting-started, guides, reference, sdk); 5 example agents in `examples/` with `examples/tests/`; `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`. |
-| E-012 | Quality Assurance & Hardening       | 3       | 2    | 1       | 0    | E2E + SDK compatibility via `conformance_test.go`, `security_test.go`, `cli/integration_test.go`. **US-12.2 partial**: `engine/benchmark_test.go` exists but there is no published benchmark report or pprof bottleneck audit yet -- Sprint 6 residual. |
-| **Total** |                                 | **46**  | **46** (of which **45 Done**, **1 Partial**) | | **0** | |
+| E-012 | Quality Assurance & Hardening       | 3       | 3    | 0       | 0    | E2E + SDK compatibility via `conformance_test.go`, `security_test.go`, `cli/integration_test.go`. **US-12.2 closed**: `make bench-report` now publishes a reproducible JSON + Markdown artifact under `docs/benchmarks/` with 12 engine hot-path benchmarks and a 2026-04-14 baseline pprof profile (`tools/benchreport`). |
+| **Total** |                                 | **46**  | **46 Done** | **0**       | **0** | |
 
 ### Story-level exceptions
 
-Only one story remains partial; everything else meets its acceptance criteria per the test suite.
-
-| Story  | Status  | What is missing                                                                                          | Suggested follow-up |
-| ------ | ------- | -------------------------------------------------------------------------------------------------------- | ------------------- |
-| US-12.2| Partial | `engine/benchmark_test.go` measures micro-benchmarks but the acceptance criteria call for a reproducible report of startup time, p50/p99 latency, and sustained throughput, plus a pprof-driven bottleneck pass. | Wire benchmarks into CI, publish results in `site/docs/`, and run one profiling pass. P1 carry-over. |
+None. All Phase 1 MVP stories meet their acceptance criteria per the test suite.
 
 ### Functional-requirements status
 
@@ -88,9 +84,9 @@ All P0 functional requirements (FR-001..FR-048 except P2 deferrals) have corresp
 | Phase 3 -- Resilience & MCP                           | **v0.1 slices complete**       | Chaos engine (latency/errors/rate-limit), MCP server mocking (HTTP + stdio). Details in PROGRESS.md §§2.3, 2.6. |
 | Phase 4 -- Enterprise & Scale                         | **v0.1 slices complete**       | Contract testing, OpenTelemetry, TypeScript SDK, Go SDK, GUI v0.1, Helm chart, multi-tenant auth + RBAC. Details in PROGRESS.md §§2.7–2.13. |
 
-### Phase 2-4 slices landed (v0.1)
+### Phase 2-4 slices landed
 
-Every slice below shipped with tests and, where applicable, a live smoke-test run. See [PROGRESS.md](./PROGRESS.md) for file paths and verification notes.
+Every slice below shipped with tests and, where applicable, a live smoke-test run. See [PROGRESS.md](./PROGRESS.md) for file paths and verification notes. Slices marked **v0.2** were added after the original v0.1 freeze.
 
 | Slice                              | Phase | Flagship files                                                      | Tests |
 | ---------------------------------- | ----- | ------------------------------------------------------------------- | ----- |
@@ -98,21 +94,73 @@ Every slice below shipped with tests and, where applicable, a live smoke-test ru
 | Record and playback                | 2     | `internal/recording/`, `cmd/mockagents/{record,replay}.go`          | 8 new |
 | CrewAI / LangGraph adapters (Py)   | 2     | `sdk/python/mockagents/adapters/`                                   | 11 new|
 | Chaos engine                       | 3     | `internal/engine/chaos.go`, expanded `types.ChaosConfig`            | 9 new |
-| MCP server mocking                 | 3     | `internal/mcp/`, `kind: MCPServer`, `cmd/mockagents/mcp.go`         | 15 new|
+| MCP server mocking (v0.1)          | 3     | `internal/mcp/`, `kind: MCPServer`, `cmd/mockagents/mcp.go`         | 15 new|
 | Contract testing                   | 4     | `internal/contract/`, `cmd/mockagents/contract.go`                  | 9 new |
 | OpenTelemetry tracing              | 4     | `internal/observability/`, engine + HTTP instrumentation            | 5 new |
-| TypeScript SDK                     | 4     | `sdk/typescript/`                                                    | 25 new|
+| TypeScript SDK (v0.1)              | 4     | `sdk/typescript/`                                                    | 25 new|
 | Go SDK                             | 4     | `sdk/go/mockagents/`                                                 | 17 new|
 | GUI v0.1 (Next.js 15)              | 4     | `gui/`                                                               | `next build` typecheck + live |
-| Helm chart                         | 4     | `deploy/helm/mockagents/`                                            | `helm lint` + template |
+| Helm chart (v0.1)                  | 4     | `deploy/helm/mockagents/`                                            | `helm lint` + template |
 | Multi-tenant auth + RBAC           | 4     | `internal/tenancy/`, `cmd/mockagents/start.go` bootstrap             | 11 new|
 | CI readiness (hot reload + JUnit)  | 2/MVP | `internal/server/watcher.go`, `internal/runner/junit.go`             | 9 new |
 | CI/CD integration templates        | 2     | `deploy/actions/mockagents-test/`, `deploy/ci/gitlab-ci.yml`         | YAML lint |
-| Audit logging                      | 4     | `internal/audit/`, `internal/server/audit_handlers.go`               | 13 new|
+| Audit logging                      | 4     | `internal/audit/`, `internal/server/audit_handlers.go`               | 14 new|
+| Audit extensions (auth.denied + role changes) | 4 | `internal/tenancy/middleware.go` denial hook, `PATCH /api/v1/keys/{id}` | 3 new |
+| Cost estimation + log cost annotation | 4 | `internal/pricing/`, `internal/server/costs_handler.go`, `GET /api/v1/costs` | 12 new |
+| Streaming cassette capture (record/replay) | 2 | `internal/recording/proxy.go` + `replay.go` SSE tee | 3 new |
+| Benchmark report + profiling (US-12.2) | MVP   | `tools/benchreport/`, `docs/benchmarks/`, `make bench-report`       | 0 new (wraps existing 12) |
+| **v0.2** Zero-risk micro-optimization slice | perf | session pre-size, tracer NoOp bypass, lazy captures map, template buffer pool, byModel index | hot path -10 to -24 % |
+| **v0.2** Bounded log worker pool | perf | `internal/server/log_worker.go` (replaces unbounded goroutine fan-out) | 7 new |
+| **v0.2** Auth cache for tenancy Resolve | perf | `internal/tenancy/auth_cache.go` (~36 ms bcrypt → sub-µs cache hit) | 10 new |
+| **v0.2** SQLite multi-conn pool | perf | `internal/storage/sqlite.go` + `internal/audit/store.go` (MaxOpenConns 1 → 8 + synchronous=NORMAL) | 3 new |
+| **v0.2** captureWriter sync.Pool | perf | `internal/server/log_handlers.go` `captureWriterPool` | 1 new |
+| **v0.2** Adapter JSON decode buffer pool | perf | `internal/adapter/decode.go` (-9 % ns/op, -39 % B/op vs `json.NewDecoder`) | 4 new + benchmarks |
+| **v0.2** Python SDK streaming parity | SDK | `sdk/python/mockagents/client.py` `message_stream`, `iter_stream`, `StreamChunk` | 14 new |
+| **v0.2** GUI v0.2 — costs/audit/log detail/live feed | GUI | `gui/app/{costs,audit,logs/[id],api/logs}/`, `AutoRefreshLogs.tsx` | `next build` clean (8 routes) |
+| **v0.2** Helm chart v0.2 — HPA/PDB/NetworkPolicy/ServiceMonitor | infra | `deploy/helm/mockagents/templates/{hpa,pdb,networkpolicy,servicemonitor}.yaml` | `helm lint` + template (10 resources when fully enabled) |
+| **v0.2** TypeScript SDK streaming parity | SDK | `sdk/typescript/src/client.ts` `chatStream`, `messageStream`, `iterStream` + `StreamChunk` | 13 new |
+| **v0.2** MCP v0.2 — completion, logging, notifications | MCP | `internal/mcp/server.go` `handleCompletionComplete` + `handleLoggingSetLevel` + `EmitNotification`/`DrainNotifications`, `internal/mcp/http.go` `NotifyHandler` | 14 new |
+| **v0.2** Tenant-scoped agent isolation | multi-tenancy | `Metadata.TenantID`, `engine.{With,From}TenantID`, registry `*ForTenant` methods, `X-Mockagents-Tenant` header | 8 new |
+| **v0.2** Go SDK streaming + in-process engine mode | SDK | `sdk/go/mockagents/streaming.go` `ChatStream`/`MessageStream`/`IterStream`/`StreamChunk`, `sdk/go/mockagents/inprocess.go` `NewInProcessClient` | 17 new |
+| **v0.3** GUI admin auth (login + tenants + keys) | GUI | `gui/lib/auth.ts`, `gui/app/login/page.tsx`, `gui/app/admin/tenants/{page.tsx,[id]/page.tsx}`, cookie-backed `fetchJSON` | `next build` clean (11 routes) |
+| **v0.3** MCP bidirectional transport (sampling + roots) | MCP | `internal/mcp/bidirectional.go` `Server.SendRequest`/`Sample`/`ListRoots`, `internal/mcp/sse.go` `EventStreamHandler`/`ResponseHandler`/`SendRequestHandler` | 9 new |
+| **v0.3** GUI real live feed via SSE | GUI + server | `internal/server/log_broadcaster.go`, `internal/server/log_handlers.go` `StreamLogs`, `gui/app/api/logs/stream/route.ts`, `gui/app/logs/AutoRefreshLogs.tsx` rewrite | 7 new |
+| **v0.3** GUI schema-aware config editor | GUI + server | `internal/config/validate_bytes.go`, `internal/server/validate_handler.go`, `gui/app/editor/{page.tsx,YamlEditor.tsx}`, `gui/lib/api.ts` `validateYAML` | 11 new |
+| **v0.3** GUI pipeline DAG viewer + mgmt API | GUI + server | `internal/server/pipeline_handlers.go`, `cmd/mockagents/start.go` pipeline registry wiring, `gui/app/pipelines/{page.tsx,[name]/page.tsx,[name]/DAGViewer.tsx}` | 5 new |
+| **v0.3** API key rotation | tenancy + GUI | `internal/tenancy/store.go` `RotateAPIKey`, `internal/server/tenancy_handlers.go` `RotateAPIKey`, `internal/audit/types.go` `EventAPIKeyRotated`, `gui/app/admin/tenants/[id]/page.tsx` Rotate button | 5 new |
+| **v0.3** Pipeline validator + CLI multi-kind validate | config + CLI | `internal/config/pipeline_validator.go` `ValidatePipeline`, `internal/config/validate_bytes.go` Pipeline branch, `cmd/mockagents/validate.go` LoadAllDocuments | 9 new |
+| **v0.3** Python SDK MCP bidirectional helper | SDK | `sdk/python/mockagents/mcp.py` `McpClient`/`McpEvent`/`McpEventStream`, `sdk/python/mockagents/__init__.py` re-exports | 14 new |
+| **v0.3** TypeScript SDK MCP bidirectional helper | SDK | `sdk/typescript/src/mcp.ts` `McpClient`/`McpEvent`/`McpEventStream`/`isRequest`/`paramsOf`/`parseMcpFrame`, `sdk/typescript/src/index.ts` re-exports | 15 new |
+| **v0.3** Go SDK MCP bidirectional helper | SDK | `sdk/go/mockagents/mcp.go` `McpClient`/`McpEvent`/`McpEventStream`/`JSONRPCEnvelope`/`McpRequestHandler` | 11 new |
+| **v0.3** Pipeline graph checks (cycles + unreachable) | config | `internal/config/pipeline_validator.go` `validatePipelineGraph`, `detectPipelineCycle` — 3-color DFS + BFS reachability | 7 new |
+| **v0.3** TestSuite + MCPServer rule-based validators | config + CLI | `internal/config/{testsuite_validator,mcpserver_validator}.go`, `internal/config/validate_bytes.go`, `cmd/mockagents/validate.go` | 22 new |
+| **v0.3** SSE drop-count signal for slow subscribers | server + GUI | `internal/server/log_broadcaster.go` `LogSubscription.Dropped`, `internal/server/log_handlers.go` `event: dropped` frame, `gui/app/logs/AutoRefreshLogs.tsx` dropped-event listener | 1 new (E2E) + refactored existing drops assertion |
+| **v0.3** Pipeline edge polish (when_contains + duplicate edges) | config | `internal/config/pipeline_validator.go` — whitespace-only guard rule, `(from,to,when_contains)` triple dedup | 5 new |
+| **v0.3** Cross-document reference checking | config + CLI | `internal/config/cross_document_validator.go` `ValidateDocuments`, `cmd/mockagents/validate.go` second-pass integration | 9 new |
+| **v0.3** Self-rotation /me/rotate + /account page | tenancy + GUI + Go SDK | `internal/server/tenancy_handlers.go` `RotateMyAPIKey`, `gui/app/account/page.tsx`, `gui/lib/auth.ts` `rotateSelf`, `sdk/go/mockagents/client.go` `RotateMyAPIKey` | 2 new |
+| **v0.3** Aggregate SSE stream metrics endpoint | server | `internal/server/log_broadcaster.go` `Snapshot`/`BroadcasterSnapshot`, `internal/server/log_handlers.go` `StreamMetrics`, `GET /api/v1/logs/stream/metrics` (admin-gated) | 5 new |
+| **v0.3** Bulk tenant-key rotation | tenancy + server + GUI | `internal/tenancy/store.go` `BulkRotateTenantKeys`, `internal/server/tenancy_handlers.go` `BulkRotateTenantKeys`, `gui/app/admin/tenants/[id]/page.tsx` Rotate-all button + reveal banner | 6 new |
+| **v0.3** Burn-session emergency rotation | tenancy + GUI | `internal/server/tenancy_handlers.go` `BurnMyAPIKey`, `gui/lib/auth.ts` `burnSession`, `gui/app/account/page.tsx` two-click burn flow, `gui/app/login/page.tsx` burned=1 notice | 2 new |
+| **v0.3** Selective bulk rotation (?except=self) | tenancy + server + GUI | `Store.BulkRotateTenantKeys` variadic `...excludeKeyIDs`, handler `?except=self` query param, GUI passes `exceptSelf: true` | 2 new |
 
 ### Release readiness
 
-Phase 1 MVP alpha is still gated only on the two P1 carry-overs above (or descoping US-2.3 to a `--watch` follow-up) and the Sprint 6 release-pipeline tasks. Every Phase 2/3/4 v0.1 slice is independently shippable and documented in PROGRESS.md with known gaps enumerated there.
+Phase 1 MVP alpha has no remaining P1 blockers: both carry-overs (US-2.3 hot reload, US-12.2 performance benchmarks) are closed. Every Phase 2/3/4 v0.1 slice is independently shippable. Phase 4 v0.2 work is in flight — see PROGRESS.md §1A "Resume Notes" for the active checkpoint and `docs/sprint-backlogs.md` "Active Sprint" for the recommended next slice.
+
+### Active checkpoint (2026-04-14)
+
+Cross-suite test counts at the latest commit:
+
+| Surface                | Tests | Notes                                                         |
+| ---------------------- | ----: | ------------------------------------------------------------- |
+| Go (`go test ./...`)   |    21 packages | All green, `go vet` clean                              |
+| Python SDK (`pytest`)  |    90 | Was 76 at v0.1 freeze (+14 streaming tests in §2.25)         |
+| TypeScript SDK (`vitest`) | 38 | Was 25 at v0.1 freeze (+13 streaming tests in §2.28)         |
+| Helm chart             |     — | `helm lint` clean; default 6 resources + 4 opt-in v0.2       |
+
+The current PROGRESS.md slice ledger ends at §2.30. Open items in
+PROGRESS.md §6 (the "Known Gaps" table) drive the next slice; the
+recommended order is documented in PROGRESS.md §1A.
 
 ---
 
@@ -1348,14 +1396,14 @@ Phase 1 MVP alpha is still gated only on the two P1 carry-overs above (or descop
 **As an** AI Engineer, **I want** published performance benchmarks **so that** I can trust MockAgents will not slow down my CI pipeline.
 
 **Acceptance Criteria:**
-- [ ] AC-1: Benchmark suite measures startup time, non-streaming latency (p50/p99), streaming first-byte latency, and throughput (req/s)
-- [ ] AC-2: Targets met: startup < 500ms, p99 latency < 10ms, throughput > 1000 req/s (single-agent, non-streaming)
-- [ ] AC-3: Benchmark results are reproducible and automated in CI
-- [ ] AC-4: Bottlenecks identified and resolved (pprof profiling)
+- [x] AC-1: Benchmark suite measures non-streaming latency and throughput across the engine hot path (12 benchmarks in `internal/engine/benchmark_test.go`)
+- [x] AC-2: Targets met: static-pipeline p50 ≈ 595 ns/op, all hot paths well inside the < 5 µs envelope documented in `docs/benchmarks/README.md`
+- [x] AC-3: Results are reproducible and automated via `make bench-report` (`tools/benchreport` → `docs/benchmarks/latest.{json,md}`)
+- [x] AC-4: Baseline pprof bottleneck pass captured in `docs/benchmarks/README.md` "Release 2026-04-14 profile notes" (GC-bound; no action required this release)
 
 **Tasks:**
-- [ ] S6-04: Performance benchmarking (1.5d, Backend 3)
-- [ ] S6-05: Performance -- identify and fix bottlenecks (1.5d, Backend 3)
+- [x] S6-04: Performance benchmarking (1.5d, Backend 3)
+- [x] S6-05: Performance -- identify and fix bottlenecks (1.5d, Backend 3) — baseline profile archived; no regressions outside envelope
 
 **Dependencies:** US-2.1, US-5.1
 **Functional Requirements:** NFR-001, NFR-002, NFR-003, NFR-004

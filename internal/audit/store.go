@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -45,19 +44,32 @@ type Store interface {
 // enough to get a working store.
 type SQLiteStore struct {
 	db *sql.DB
-	mu sync.Mutex
 }
 
 // NewSQLiteStore opens or creates the audit database at the given
-// path and applies the schema. The single-open-conn pattern matches
-// the rest of the storage layer so writes never starve reads.
+// path and applies the schema.
+//
+// Pool sizing matches the interaction log store (MaxOpenConns=8) on
+// top of WAL + synchronous=NORMAL. This lets auth-denial bursts
+// (which can surge during credential-stuffing probes) append in
+// parallel with admin read queries instead of serializing behind a
+// single connection. SQLite itself still serializes the write
+// transaction under WAL, so concurrent Append callers effectively
+// queue at the database layer — the multi-conn pool just prevents
+// reads from blocking on in-flight writes and vice versa.
+//
+// Unlike the tenancy store, the audit store never holds a Rows
+// iterator open across a second query (see the comment on
+// tenancy.SQLiteStore for why that matters), so raising the pool
+// here is safe.
 func NewSQLiteStore(path string) (*SQLiteStore, error) {
-	dsn := path + "?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)"
+	dsn := path + "?_pragma=journal_mode(wal)&_pragma=synchronous(normal)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open audit db %s: %w", path, err)
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(8)
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply audit schema: %w", err)
@@ -89,8 +101,10 @@ func (s *SQLiteStore) Append(ctx context.Context, e *Event) error {
 		e.Actor.Name = "anonymous"
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// No Go-level mutex: database/sql + SQLite's own write
+	// serialization under WAL already provide the correctness we
+	// need, and holding a mutex across ExecContext would re-serialize
+	// everything the new pool just enabled to run in parallel.
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO audit_events
 		 (timestamp, kind, actor_name, actor_tenant, actor_key, actor_role, actor_ip, target, details)

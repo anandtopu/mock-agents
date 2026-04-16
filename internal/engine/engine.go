@@ -71,27 +71,44 @@ func (e *Engine) ProcessRequest(req *InboundRequest) (*Response, error) {
 // HTTP adapters thread the incoming request context through here so
 // trace spans link to the server span emitted by HTTPMiddleware.
 func (e *Engine) ProcessRequestContext(ctx context.Context, req *InboundRequest) (*Response, error) {
+	// Cache the flag once per request so the hot path does not re-read
+	// the package-level variable (cheap but still an indirection).
+	// When tracing is disabled we skip every SetAttributes / RecordError
+	// call site below — the attribute.KeyValue construction and the
+	// varargs slice allocation are the measurable costs, not the
+	// StartSpan call itself (which bottoms out in a noop provider).
+	traceOn := observability.IsEnabled()
+
 	ctx, span := observability.StartSpan(ctx, "engine.process_request")
 	defer span.End()
 
-	// 1. Resolve agent by name or model.
-	agent, err := e.resolveAgent(req)
+	// 1. Resolve agent by name or model. The tenant id (when set on
+	// the context by the HTTP layer) constrains lookups so a caller
+	// from tenant A cannot accidentally invoke tenant B's agents.
+	tenantID := TenantIDFromContext(ctx)
+	agent, err := e.resolveAgentForTenant(req, tenantID)
 	if err != nil {
-		observability.RecordError(span, err)
+		if traceOn {
+			observability.RecordError(span, err)
+		}
 		return nil, err
 	}
-	span.SetAttributes(
-		attribute.String("agent.name", agent.Metadata.Name),
-		attribute.String("agent.model", agent.Spec.Model),
-		attribute.String("agent.protocol", agent.Spec.Protocol),
-	)
+	if traceOn {
+		span.SetAttributes(
+			attribute.String("agent.name", agent.Metadata.Name),
+			attribute.String("agent.model", agent.Spec.Model),
+			attribute.String("agent.protocol", agent.Spec.Protocol),
+		)
+	}
 
 	// 1a. Chaos injection runs before any work so 429s and injected errors
 	// are cheap and latency is tacked on at the end.
 	if e.Chaos != nil {
 		if chaosErr := e.Chaos.Before(agent); chaosErr != nil {
 			e.Logger.Info("chaos injected", "agent", agent.Metadata.Name, "error", chaosErr)
-			observability.RecordError(span, chaosErr)
+			if traceOn {
+				observability.RecordError(span, chaosErr)
+			}
 			return nil, chaosErr
 		}
 	}
@@ -100,7 +117,9 @@ func (e *Engine) ProcessRequestContext(ctx context.Context, req *InboundRequest)
 	// 2. Extract latest user message.
 	userMsg := latestUserMessage(req.Messages)
 	if userMsg == "" {
-		observability.RecordError(span, ErrEmptyMessage)
+		if traceOn {
+			observability.RecordError(span, ErrEmptyMessage)
+		}
 		return nil, ErrEmptyMessage
 	}
 
@@ -148,13 +167,17 @@ func (e *Engine) ProcessRequestContext(ctx context.Context, req *InboundRequest)
 	resp, err := e.Generator.Generate(agent, scenario, tmplCtx)
 	if err != nil {
 		wrapped := fmt.Errorf("generating response for agent %q: %w", agent.Metadata.Name, err)
-		observability.RecordError(span, wrapped)
+		if traceOn {
+			observability.RecordError(span, wrapped)
+		}
 		return nil, wrapped
 	}
-	span.SetAttributes(
-		attribute.String("agent.scenario", scenario.Name),
-		attribute.Int("agent.tool_calls", len(resp.ToolCalls)),
-	)
+	if traceOn {
+		span.SetAttributes(
+			attribute.String("agent.scenario", scenario.Name),
+			attribute.Int("agent.tool_calls", len(resp.ToolCalls)),
+		)
+	}
 
 	// 6. Process tool calls — resolve responses against tool definitions.
 	if len(resp.ToolCalls) > 0 && len(agent.Spec.Tools) > 0 {
@@ -194,27 +217,45 @@ func (e *Engine) ProcessRequestContext(ctx context.Context, req *InboundRequest)
 }
 
 // resolveAgent finds the agent by name first, then by model field.
+// Kept for callers that still use the no-tenant-context fast path
+// (most legacy tests and the in-process Go SDK) — equivalent to
+// resolveAgentForTenant("").
 func (e *Engine) resolveAgent(req *InboundRequest) (*types.AgentDefinition, error) {
+	return e.resolveAgentForTenant(req, "")
+}
+
+// resolveAgentForTenant is the tenant-aware variant. Empty tenantID
+// reproduces the v0.1 behavior (global agents only); a non-empty
+// tenantID returns global ∪ that tenant's own agents.
+func (e *Engine) resolveAgentForTenant(req *InboundRequest, tenantID string) (*types.AgentDefinition, error) {
 	if req.AgentName != "" {
-		if agent := e.Registry.Get(req.AgentName); agent != nil {
+		if agent := e.Registry.GetForTenant(req.AgentName, tenantID); agent != nil {
 			return agent, nil
 		}
 	}
 	if req.Model != "" {
-		if agent := e.Registry.GetByModel(req.Model); agent != nil {
+		if agent := e.Registry.GetByModelForTenant(req.Model, tenantID); agent != nil {
 			return agent, nil
 		}
 	}
-	// If only one agent is registered, use it as default.
-	agents := e.Registry.List()
-	if len(agents) == 1 {
-		return agents[0], nil
+	// If only one agent is visible to this caller, use it as the
+	// default. Tenant-bound callers skip this fallback so "the
+	// tenant happens to own one agent" never becomes an implicit
+	// default — that would let a misrouted request silently land on
+	// the wrong agent. Anonymous callers retain v0.1 semantics so
+	// single-agent demos keep working without specifying a model.
+	if tenantID == "" {
+		agents := e.Registry.ListForTenant("")
+		if len(agents) == 1 {
+			return agents[0], nil
+		}
 	}
 	identifier := req.AgentName
 	if identifier == "" {
 		identifier = req.Model
 	}
-	return nil, fmt.Errorf("%w: %q (available: %v)", ErrAgentNotFound, identifier, e.Registry.ListNames())
+	return nil, fmt.Errorf("%w: %q (available: %v)",
+		ErrAgentNotFound, identifier, e.Registry.ListNamesForTenant(tenantID))
 }
 
 func latestUserMessage(messages []RequestMessage) string {

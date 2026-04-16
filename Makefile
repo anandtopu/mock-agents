@@ -2,6 +2,7 @@
        lint fmt clean validate docker docker-up docker-down \
        gui-dev gui-build \
        helm-lint helm-template helm-package \
+       bench bench-report \
        release run setup help
 
 BINARY    := mockagents
@@ -75,6 +76,13 @@ docker-up:                      ## Start services with docker-compose
 
 docker-down:                    ## Stop docker-compose services
 	docker compose down
+
+## Benchmarks
+bench:                          ## Run Go benchmarks (engine hot paths)
+	$(GO) test -run=^$$ -bench=. -benchmem -benchtime=1s ./internal/engine/...
+
+bench-report:                   ## Run benchmarks and refresh docs/benchmarks/latest.{json,md}
+	$(GO) run ./tools/benchreport -pkg ./internal/engine/... -out docs/benchmarks -benchtime 1s -count 1
 
 ## Release
 release:                        ## Build release binaries with GoReleaser (dry run)

@@ -21,6 +21,11 @@ import (
 )
 
 // Interaction is a single captured request/response pair.
+//
+// Streaming SSE responses are stored in StreamEvents (each chunk with
+// a millisecond offset from the start of the response) instead of
+// ResponseBody. Non-streaming JSON responses keep the old shape. A
+// cassette can contain a mix of both.
 type Interaction struct {
 	RecordedAt      time.Time         `json:"recorded_at"`
 	Hash            string            `json:"hash"`
@@ -31,6 +36,21 @@ type Interaction struct {
 	ResponseStatus  int               `json:"response_status"`
 	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
 	ResponseBody    json.RawMessage   `json:"response_body,omitempty"`
+	// Streaming is true for captured Server-Sent Events responses.
+	// When set, ResponseBody is empty and StreamEvents holds the
+	// ordered chunks that were pushed to the client.
+	Streaming    bool          `json:"streaming,omitempty"`
+	StreamEvents []StreamEvent `json:"stream_events,omitempty"`
+}
+
+// StreamEvent is one chunk of a captured SSE response. Data holds the
+// raw bytes exactly as the upstream server sent them (including
+// `data: ...\n\n` framing). DelayMs is the offset in milliseconds
+// from the start of the response, so replay can optionally re-honor
+// the original pacing.
+type StreamEvent struct {
+	DelayMs int64  `json:"delay_ms"`
+	Data    string `json:"data"`
 }
 
 // Cassette is an in-memory collection of Interaction records indexed by

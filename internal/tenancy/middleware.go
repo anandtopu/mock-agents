@@ -29,6 +29,31 @@ func PrincipalFrom(ctx context.Context) *Principal {
 	return p
 }
 
+// DenialHook is invoked synchronously by AuthMiddleware and
+// RequireRole whenever a request is rejected with 401 or 403. The
+// server wiring installs a hook that forwards the event into the
+// audit log. Kept as a package-level variable so existing call sites
+// (tests, alternative transports) do not have to learn a new
+// signature; a nil hook is a cheap no-op.
+//
+// Hooks must not block: they run on the hot request path before the
+// 401/403 response is written. The reference implementation in the
+// server package records asynchronously via audit.Recorder.
+var DenialHook func(r *http.Request, status int, reason string)
+
+// SetDenialHook installs h as the package-wide denial callback. Pass
+// nil to disable. Safe to call exactly once at startup; not safe for
+// concurrent re-binding during request handling.
+func SetDenialHook(h func(r *http.Request, status int, reason string)) {
+	DenialHook = h
+}
+
+func fireDenial(r *http.Request, status int, reason string) {
+	if DenialHook != nil {
+		DenialHook(r, status, reason)
+	}
+}
+
 // ExtractAPIKey pulls a bearer token from the Authorization header or
 // X-Api-Key header, in that order. Empty on miss.
 func ExtractAPIKey(r *http.Request) string {
@@ -54,15 +79,18 @@ func AuthMiddleware(store Store, skip func(*http.Request) bool) func(http.Handle
 			}
 			key := ExtractAPIKey(r)
 			if key == "" {
+				fireDenial(r, http.StatusUnauthorized, "missing credentials")
 				writeAuthError(w, http.StatusUnauthorized, "missing Authorization bearer token or X-Api-Key header")
 				return
 			}
 			principal, err := store.Resolve(r.Context(), key)
 			if err != nil {
 				if errors.Is(err, ErrInvalidKey) {
+					fireDenial(r, http.StatusUnauthorized, "invalid api key")
 					writeAuthError(w, http.StatusUnauthorized, "invalid api key")
 					return
 				}
+				fireDenial(r, http.StatusInternalServerError, "auth store error")
 				writeAuthError(w, http.StatusInternalServerError, "auth store error")
 				return
 			}
@@ -79,10 +107,13 @@ func RequireRole(required Role, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := PrincipalFrom(r.Context())
 		if p == nil {
+			fireDenial(r, http.StatusUnauthorized, "authentication required")
 			writeAuthError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 		if !p.Role.AtLeast(required) {
+			fireDenial(r, http.StatusForbidden,
+				"role "+string(p.Role)+" insufficient; "+string(required)+" required")
 			writeAuthError(w, http.StatusForbidden,
 				"role "+string(p.Role)+" is insufficient; "+string(required)+" required")
 			return

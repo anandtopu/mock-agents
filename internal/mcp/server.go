@@ -12,16 +12,81 @@ import (
 
 // Server dispatches JSON-RPC 2.0 requests against an MCPServerDefinition.
 // A single Server instance is safe for concurrent use.
+//
+// v0.2 additions: the Server also tracks a current `logging/setLevel`
+// value, an autocomplete catalog for `completion/complete`, and a
+// pending-notification queue that the stdio/HTTP transports drain
+// after every request. Notifications are how MCP servers signal
+// list changes to clients (e.g. `notifications/tools/list_changed`)
+// without a bidirectional channel — the mock keeps them in memory
+// until a transport ships them out.
 type Server struct {
 	def *types.MCPServerDefinition
 
-	mu     sync.RWMutex
-	inited bool
+	mu      sync.RWMutex
+	inited  bool
+	logLvl  string
+	pending []*Notification
+
+	// bi drives the v0.3 bidirectional transport: SSE subscribers,
+	// server-initiated requests (sampling/roots), and their response
+	// correlation map. Always non-nil; constructed by NewServer.
+	bi *bidirectional
+}
+
+// Notification is a server-initiated JSON-RPC notification (no id).
+// Transports drain the queue after each handled request and write
+// these out alongside the response.
+type Notification struct {
+	Method string         `json:"method"`
+	Params map[string]any `json:"params,omitempty"`
 }
 
 // NewServer creates a Server bound to a single MCPServerDefinition.
 func NewServer(def *types.MCPServerDefinition) *Server {
-	return &Server{def: def}
+	return &Server{def: def, bi: newBidirectional()}
+}
+
+// EmitNotification enqueues a server-initiated JSON-RPC notification
+// for the next transport drain. Safe for concurrent use. The mock
+// emits these on demand so test harnesses can verify their MCP
+// clients react correctly to list-changed events without needing a
+// real upstream server.
+func (s *Server) EmitNotification(method string, params map[string]any) {
+	n := &Notification{Method: method, Params: params}
+	s.mu.Lock()
+	s.pending = append(s.pending, n)
+	s.mu.Unlock()
+	// Also push through the bidirectional queue so any SSE subscriber
+	// sees the notification in the same ordered stream as server-
+	// initiated requests. Plain-HTTP callers keep observing
+	// notifications via DrainNotifications / the X-MCP-Pending-*
+	// header on the next response.
+	s.pushNotification(n)
+}
+
+// DrainNotifications returns any queued notifications and clears the
+// queue. Transports call this after writing a response so server
+// notifications are interleaved with request handling at the
+// natural cadence of a real MCP server.
+func (s *Server) DrainNotifications() []*Notification {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pending) == 0 {
+		return nil
+	}
+	out := s.pending
+	s.pending = nil
+	return out
+}
+
+// LogLevel returns the most recent value set via `logging/setLevel`,
+// or the empty string when the client has not configured it. Useful
+// for tests that need to assert the server observed a level change.
+func (s *Server) LogLevel() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.logLvl
 }
 
 // Definition returns the underlying MCP server definition.
@@ -59,6 +124,21 @@ func (s *Server) Handle(req *Request) *Response {
 		return s.handlePromptsList(req)
 	case "prompts/get":
 		return s.handlePromptsGet(req)
+	case "completion/complete":
+		return s.handleCompletionComplete(req)
+	case "logging/setLevel":
+		return s.handleLoggingSetLevel(req)
+	case "sampling/createMessage", "roots/list":
+		// These methods are server→client in the real protocol —
+		// the mock does not have a bidirectional transport so the
+		// best we can do is return a clear "not supported" error
+		// with a hint about why. Tests that need to verify a
+		// client's handling of incoming sampling/roots requests
+		// should use EmitNotification with a custom method
+		// instead.
+		return newError(req.ID, ErrMethodNotFound,
+			fmt.Sprintf("method %q is server-initiated and not supported by the mock without a bidirectional transport", req.Method),
+			map[string]any{"hint": "use Server.EmitNotification or POST /mcp/notify to drive the client side"})
 	default:
 		if req.IsNotification() {
 			return nil
@@ -343,4 +423,133 @@ func expandArgs(s string, args map[string]string) string {
 		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
 	}
 	return s
+}
+
+// --- v0.2 method handlers ---
+
+type completionRef struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
+}
+
+type completionArgument struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type completionParams struct {
+	Ref      completionRef      `json:"ref"`
+	Argument completionArgument `json:"argument"`
+}
+
+type completionValues struct {
+	Values  []string `json:"values"`
+	Total   int      `json:"total,omitempty"`
+	HasMore bool     `json:"hasMore,omitempty"`
+}
+
+// handleCompletionComplete returns autocomplete suggestions for a
+// prompt or resource argument. The mock walks the configured
+// completion catalog and picks the first entry whose RefType /
+// RefName / ArgName all match (empty fields in the config wildcard).
+// When the request carries a non-empty argument value the result is
+// further filtered by case-insensitive prefix so the response shape
+// is identical to a real autocomplete server's "narrow as you type".
+func (s *Server) handleCompletionComplete(req *Request) *Response {
+	var params completionParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return newError(req.ID, ErrInvalidParams, "invalid params for completion/complete", err.Error())
+	}
+	if params.Argument.Name == "" {
+		return newError(req.ID, ErrInvalidParams, "argument.name is required", nil)
+	}
+
+	values := s.lookupCompletion(params.Ref.Type, params.Ref.Name, params.Argument.Name)
+	if params.Argument.Value != "" {
+		values = filterPrefix(values, params.Argument.Value)
+	}
+
+	// Spec caps each completion response at 100 items.
+	const maxValues = 100
+	hasMore := false
+	total := len(values)
+	if len(values) > maxValues {
+		hasMore = true
+		values = values[:maxValues]
+	}
+	return newResult(req.ID, map[string]any{
+		"completion": completionValues{
+			Values:  values,
+			Total:   total,
+			HasMore: hasMore,
+		},
+	})
+}
+
+// lookupCompletion walks the configured catalog and returns a copy
+// of the first matching entry's Values. Empty config fields in the
+// entry act as wildcards so a single entry can serve every prompt.
+func (s *Server) lookupCompletion(refType, refName, argName string) []string {
+	for _, c := range s.def.Spec.Completions {
+		if c.RefType != "" && c.RefType != refType {
+			continue
+		}
+		if c.RefName != "" && c.RefName != refName {
+			continue
+		}
+		if c.ArgName != argName {
+			continue
+		}
+		out := make([]string, len(c.Values))
+		copy(out, c.Values)
+		return out
+	}
+	return nil
+}
+
+// filterPrefix returns the entries of values whose lowercased form
+// starts with the lowercased prefix. The slice is reused — callers
+// must not retain the original.
+func filterPrefix(values []string, prefix string) []string {
+	if prefix == "" {
+		return values
+	}
+	lp := strings.ToLower(prefix)
+	out := values[:0]
+	for _, v := range values {
+		if strings.HasPrefix(strings.ToLower(v), lp) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+type setLevelParams struct {
+	Level string `json:"level"`
+}
+
+// handleLoggingSetLevel records the requested log verbosity and
+// returns an empty result. The recorded value is observable via
+// Server.LogLevel for tests; the mock does not actually filter any
+// internal log output because it has none.
+func (s *Server) handleLoggingSetLevel(req *Request) *Response {
+	var params setLevelParams
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return newError(req.ID, ErrInvalidParams, "invalid params for logging/setLevel", err.Error())
+	}
+	if params.Level == "" {
+		return newError(req.ID, ErrInvalidParams, "level is required", nil)
+	}
+	switch params.Level {
+	case "debug", "info", "notice", "warning", "error", "critical", "alert", "emergency":
+		// valid syslog-ish level
+	default:
+		return newError(req.ID, ErrInvalidParams,
+			fmt.Sprintf("unknown level %q", params.Level),
+			map[string]any{"valid": []string{"debug", "info", "notice", "warning", "error", "critical", "alert", "emergency"}})
+	}
+	s.mu.Lock()
+	s.logLvl = params.Level
+	s.mu.Unlock()
+	return newResult(req.ID, map[string]any{})
 }

@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
+	"github.com/mockagents/mockagents/internal/engine"
 	"github.com/mockagents/mockagents/internal/pricing"
 	"github.com/mockagents/mockagents/internal/storage"
 )
@@ -15,6 +17,13 @@ import (
 type LogHandlers struct {
 	Store  *storage.SQLiteStore
 	Prices *pricing.Table // optional; when nil, cost fields are zero.
+	// Broadcaster is set when live-stream subscriptions are enabled.
+	// Nil disables StreamLogs; the server only mounts the route when
+	// this field is non-nil.
+	Broadcaster *LogBroadcaster
+	// StreamHeartbeat overrides the SSE keepalive cadence. Zero uses
+	// the default 15s. Tests may set a short duration.
+	StreamHeartbeat time.Duration
 }
 
 // LogWithCost is the wire shape returned by ListLogs when a pricing
@@ -158,16 +167,76 @@ func (h *LogHandlers) DeleteLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// captureWriterPool recycles captureWriter instances across requests.
+// Each request acquires a writer, uses it for the duration of the
+// handler chain, snapshots the body (which produces a defensive copy
+// for the async worker), and releases the writer back to the pool
+// before returning. The body slice's backing array is reused across
+// acquisitions via `body[:0]`, which is the primary win on the hot
+// path: a 1 KiB response no longer allocates a fresh slice per
+// request under sustained load.
+//
+// Safe because:
+//   1. The captured body is only ever read via snapshot(), which
+//      copies bytes into a new slice the worker owns.
+//   2. Release clears ResponseWriter to nil before returning to the
+//      pool, so a stale pointer can never escape.
+//   3. append(body[:0], ...) preserves the backing array across Put
+//      cycles without retaining references to the old request.
+var captureWriterPool = sync.Pool{
+	New: func() any { return &captureWriter{} },
+}
+
+// acquireCaptureWriter gets a captureWriter from the pool and binds
+// it to the given ResponseWriter. The returned writer has its body
+// reset to an empty slice that shares any previously allocated
+// backing array.
+func acquireCaptureWriter(w http.ResponseWriter) *captureWriter {
+	cw := captureWriterPool.Get().(*captureWriter)
+	cw.ResponseWriter = w
+	cw.statusCode = http.StatusOK
+	cw.capture = true
+	cw.truncated = false
+	cw.body = cw.body[:0]
+	return cw
+}
+
+// releaseCaptureWriter returns a captureWriter to the pool. Clearing
+// the embedded ResponseWriter is essential — leaving a stale
+// reference would pin the outer http.ResponseWriter (and whatever
+// connection state it wraps) in memory for the lifetime of the pool
+// entry.
+func releaseCaptureWriter(cw *captureWriter) {
+	cw.ResponseWriter = nil
+	// Drop the backing array if it grew pathologically large so the
+	// pool does not turn into a per-process memory high-water mark.
+	// The normal case (small responses) keeps the slice for reuse.
+	if cap(cw.body) > maxCaptureBodyBytes/4 {
+		cw.body = nil
+	}
+	captureWriterPool.Put(cw)
+}
+
 // InteractionCapture is middleware that captures request/response data for logging.
 //
 // The writer buffers up to maxCaptureBodyBytes of the response body
 // in memory so downstream cost-estimation (see internal/pricing) has
 // the usage block to parse. Streaming responses are recognized by
 // Content-Type and skip the body buffer to avoid pinning SSE chunks.
-func InteractionCapture(store *storage.SQLiteStore) func(http.Handler) http.Handler {
+//
+// Persistence is delegated to a LogWorker: the middleware builds the
+// entry on the request goroutine and submits it to a bounded queue
+// drained by a fixed worker pool. The old "spawn one goroutine per
+// request" pattern caused unbounded fan-out under load (~54 % cum GC
+// at 1.7 M ops/sec in the baseline profile). Submit is non-blocking;
+// overflow increments the worker's Dropped counter.
+//
+// The captureWriter itself is pooled via captureWriterPool so each
+// request reuses both the struct and the body slice's backing array.
+func InteractionCapture(worker *LogWorker) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if store == nil {
+			if worker == nil || worker.store == nil {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -180,49 +249,49 @@ func InteractionCapture(store *storage.SQLiteStore) func(http.Handler) http.Hand
 			}
 
 			start := time.Now()
-			cw := &captureWriter{
-				ResponseWriter: w,
-				statusCode:     http.StatusOK,
-				capture:        true,
-			}
+			cw := acquireCaptureWriter(w)
+			defer releaseCaptureWriter(cw)
+
+			// Attach a mutable RequestMeta to the context so the
+			// adapter handlers can stamp the matched agent name and
+			// model after engine resolution. Reading it back after
+			// ServeHTTP returns gives an authoritative answer without
+			// having to reparse the response body.
+			r, meta := engine.WithRequestMeta(r)
 
 			next.ServeHTTP(cw, r)
 
-			// Snapshot into a local slice so the goroutine below
-			// cannot race the request-scoped captureWriter after the
+			// Snapshot into a local slice so the worker pool cannot
+			// race the request-scoped captureWriter after the
 			// handler returns.
 			bodySnapshot := cw.snapshot()
 			streaming := cw.Header().Get("Content-Type") == "text/event-stream"
-
-			// Async log to avoid blocking the response.
-			go func() {
-				entry := &storage.InteractionLog{
-					Timestamp:      start.UTC().Format(time.RFC3339),
-					RequestMethod:  r.Method,
-					RequestPath:    path,
-					ResponseStatus: cw.statusCode,
-					LatencyMs:      time.Since(start).Milliseconds(),
-					Streaming:      streaming,
-					ResponseBody:   string(bodySnapshot),
+			agentName := meta.AgentName
+			// If the engine never ran (validation error, chaos 429 before
+			// resolve, etc.) fall back to a body probe so by_agent
+			// grouping still captures something useful.
+			if agentName == "" && len(bodySnapshot) > 0 {
+				var probe struct {
+					Model string `json:"model"`
 				}
-				// Best-effort: extract the model name from the
-				// response body and use it as AgentName so the
-				// /api/v1/costs by_agent grouping is populated even
-				// without wiring engine metadata through the
-				// middleware. A follow-up slice will plumb the
-				// matched agent name through the request context.
-				if len(bodySnapshot) > 0 {
-					var probe struct{ Model string `json:"model"` }
-					_ = json.Unmarshal(bodySnapshot, &probe)
-					entry.AgentName = probe.Model
-				}
+				_ = json.Unmarshal(bodySnapshot, &probe)
+				agentName = probe.Model
+			}
 
-				if reqID, ok := r.Context().Value(RequestIDKey).(string); ok {
-					entry.SessionID = reqID
-				}
-
-				store.Log(r.Context(), entry)
-			}()
+			entry := &storage.InteractionLog{
+				Timestamp:      start.UTC().Format(time.RFC3339),
+				RequestMethod:  r.Method,
+				RequestPath:    path,
+				ResponseStatus: cw.statusCode,
+				LatencyMs:      time.Since(start).Milliseconds(),
+				Streaming:      streaming,
+				ResponseBody:   string(bodySnapshot),
+				AgentName:      agentName,
+			}
+			if reqID, ok := r.Context().Value(RequestIDKey).(string); ok {
+				entry.SessionID = reqID
+			}
+			worker.Submit(entry)
 		})
 	}
 }
@@ -293,4 +362,117 @@ func (w *captureWriter) Flush() {
 func init() {
 	// Ensure json import is used (for writeJSON in handlers.go).
 	_ = json.Marshal
+}
+
+// StreamLogs implements GET /api/v1/logs/stream. It opens a long-lived
+// Server-Sent Events response, subscribes to the LogBroadcaster, and
+// writes each newly-persisted interaction log as one SSE frame:
+//
+//	event: log
+//	data: {"id":42,"agent_name":"echo",...}
+//
+// A `:heartbeat\n\n` comment is emitted every 15s (configurable via
+// StreamHeartbeat) so idle proxies don't reap the connection. When
+// the client disconnects or the request context is cancelled the
+// handler tears down the subscription and returns cleanly.
+//
+// Each frame is annotated with pricing data when a Prices table is
+// configured, matching ListLogs' wire shape so the GUI can share its
+// row-rendering code with the static log list.
+// StreamMetrics implements GET /api/v1/logs/stream/metrics. Returns
+// a JSON snapshot of every active /api/v1/logs/stream subscriber so
+// operators can answer "is anyone currently falling behind?" — the
+// cumulative per-tab drop count from §2.44 is per-subscription;
+// this endpoint aggregates across every connection the server
+// currently holds.
+//
+// Returns 503 when the broadcaster is nil (logging disabled) so
+// clients get a clear error rather than an empty snapshot that
+// could be misread as "no drops anywhere".
+func (h *LogHandlers) StreamMetrics(w http.ResponseWriter, r *http.Request) {
+	if h.Broadcaster == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "live feed disabled",
+		})
+		return
+	}
+	snap := h.Broadcaster.Snapshot()
+	writeJSON(w, http.StatusOK, snap)
+}
+
+func (h *LogHandlers) StreamLogs(w http.ResponseWriter, r *http.Request) {
+	if h.Broadcaster == nil {
+		http.Error(w, "live feed disabled", http.StatusServiceUnavailable)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	sub, cancel := h.Broadcaster.Subscribe(0)
+	defer cancel()
+
+	heartbeat := h.StreamHeartbeat
+	if heartbeat <= 0 {
+		heartbeat = 15 * time.Second
+	}
+	ticker := time.NewTicker(heartbeat)
+	defer ticker.Stop()
+
+	// lastDropped tracks the drop count we most recently surfaced
+	// to the client. A slow subscriber that can't keep up will
+	// see its dropped counter advance; the handler emits an
+	// `event: dropped` frame at the top of every loop iteration
+	// whenever the counter has moved, so the client learns about
+	// backpressure regardless of whether it's a data tick, a
+	// heartbeat, or just a context cancellation.
+	var lastDropped uint64
+
+	ctx := r.Context()
+	for {
+		if current := sub.Dropped(); current > lastDropped {
+			newly := current - lastDropped
+			payload := fmt.Sprintf(`{"count":%d,"new":%d}`, current, newly)
+			if _, err := fmt.Fprintf(w, "event: dropped\ndata: %s\n\n", payload); err != nil {
+				return
+			}
+			lastDropped = current
+			flusher.Flush()
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := fmt.Fprint(w, ":heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case entry, ok := <-sub.C():
+			if !ok {
+				return
+			}
+			row := annotate(*entry, h.Prices)
+			buf, err := json.Marshal(row)
+			if err != nil {
+				// Malformed rows are skipped rather than dropping
+				// the whole stream. Extremely unlikely — the
+				// InteractionLog shape is always JSON-safe.
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "event: log\ndata: %s\n\n", buf); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }

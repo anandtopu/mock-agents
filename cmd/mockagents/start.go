@@ -65,11 +65,15 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%q is not a directory", agentsDir)
 	}
 
-	// Load and validate agent definitions.
-	results, loadErrs := config.LoadDir(agentsDir)
+	// Load every document kind in the directory. Agents are required
+	// (the server won't start without at least one), but pipelines,
+	// test suites, and MCP server stubs are optional extras that add
+	// surface area to the GUI / management API when present.
+	docs, loadErrs := config.LoadAllDocuments(agentsDir)
 	for _, e := range loadErrs {
-		logger.Warn("failed to load agent file", "error", e)
+		logger.Warn("failed to load document", "error", e)
 	}
+	results := docs.Agents
 	if len(results) == 0 {
 		return fmt.Errorf("no valid agent definitions found in %q", agentsDir)
 	}
@@ -102,6 +106,24 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("all agent definitions in %q failed validation", agentsDir)
 	}
 
+	// Load pipeline definitions alongside the agent registry so the
+	// GUI's /pipelines surface and the management API have something
+	// to list. Failures to register a pipeline are logged but not
+	// fatal — the server can still serve agent traffic even if a
+	// pipeline YAML is malformed.
+	pipelineReg := engine.NewPipelineRegistry()
+	for _, pr := range docs.Pipelines {
+		if pr == nil || pr.Definition == nil {
+			continue
+		}
+		pipelineReg.Register(pr.Definition)
+		logger.Info("loaded pipeline",
+			"name", pr.Definition.Metadata.Name,
+			"topology", pr.Definition.Spec.Topology,
+			"agents", len(pr.Definition.Spec.Agents),
+		)
+	}
+
 	// Initialize engine.
 	store := state.NewMemoryStore(state.DefaultSessionTTL)
 	stopCleanup := store.StartCleanupTicker(5 * time.Minute)
@@ -124,6 +146,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	cfg.AgentsDir = agentsDir
 	cfg.Version = version
 	cfg.LogStore = logStore
+	cfg.Pipelines = pipelineReg
 
 	// Audit log: always enabled. Costs a few KB of SQLite and a
 	// handful of writes per control-plane mutation; the value is
@@ -157,6 +180,11 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("multi-tenant mode: %w", err)
 		}
 		defer tenancyStore.Close()
+		// Enable the auth cache so bcrypt runs at most once per
+		// plaintext-key per TTL window. Mutations (delete, role
+		// change) flush the cache so cached principals can never
+		// outlive their backing row.
+		tenancyStore.EnableAuthCache(5*time.Minute, 1024)
 		cfg.TenancyStore = tenancyStore
 		if err := bootstrapTenancy(cmd.Context(), tenancyStore, logger); err != nil {
 			return fmt.Errorf("bootstrap tenancy: %w", err)

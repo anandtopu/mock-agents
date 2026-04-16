@@ -52,6 +52,10 @@ type Config struct {
 	// Prices is the per-model cost table used by /api/v1/logs and
 	// /api/v1/costs. Nil disables cost annotation (fields are zero).
 	Prices *pricingpkg.Table
+	// Pipelines is the pipeline definition registry. Non-nil enables
+	// the /api/v1/pipelines management endpoints so the GUI can
+	// render a DAG viewer. Nil leaves the routes unmounted.
+	Pipelines *engine.PipelineRegistry
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -68,15 +72,17 @@ func DefaultConfig() Config {
 
 // Server wraps http.Server with the MockAgents router and lifecycle management.
 type Server struct {
-	httpServer *http.Server
-	engine     *engine.Engine
-	handlers   *Handlers
-	tenancyH   *TenancyHandlers
-	auditH     *AuditHandlers
-	recorder   *audit.Recorder
-	logger     *slog.Logger
-	config     Config
-	listener   net.Listener
+	httpServer     *http.Server
+	engine         *engine.Engine
+	handlers       *Handlers
+	tenancyH       *TenancyHandlers
+	auditH         *AuditHandlers
+	recorder       *audit.Recorder
+	logWorker      *LogWorker
+	logBroadcaster *LogBroadcaster
+	logger         *slog.Logger
+	config         Config
+	listener       net.Listener
 }
 
 // New creates a new Server with the given engine and configuration.
@@ -84,6 +90,19 @@ func New(eng *engine.Engine, cfg Config, logger *slog.Logger) *Server {
 	// The recorder is always constructed so handlers can call it
 	// unconditionally. A nil store makes it a no-op.
 	recorder := audit.NewRecorder(cfg.AuditStore, principalToActor)
+
+	// Route every 401/403 at the control plane into the audit log.
+	// The hook is a package-level variable on purpose: it lets the
+	// tenancy middleware stay oblivious of the audit package (no
+	// import cycle) while keeping existing signatures untouched.
+	tenancy.SetDenialHook(func(r *http.Request, status int, reason string) {
+		recorder.RecordHTTP(r, audit.EventAuthDenied,
+			r.Method+" "+r.URL.Path,
+			audit.MarshalDetails(map[string]any{
+				"status_code": status,
+				"reason":      reason,
+			}))
+	})
 
 	handlers := &Handlers{
 		Engine:    eng,
@@ -110,11 +129,27 @@ func New(eng *engine.Engine, cfg Config, logger *slog.Logger) *Server {
 	}
 	s.registerRoutes(mux)
 
+	// Construct the async log worker once so the middleware and
+	// Shutdown share the same instance. A nil log store leaves the
+	// worker as nil and InteractionCapture short-circuits.
+	//
+	// The log broadcaster fans every successfully-written row out to
+	// SSE subscribers (GET /api/v1/logs/stream). It is always
+	// constructed when logging is enabled — slow subscribers drop
+	// events rather than block the writer, so the overhead on the
+	// hot path is a single mutex-held map iteration.
+	if cfg.LogStore != nil {
+		s.logBroadcaster = &LogBroadcaster{}
+		s.logWorker = NewLogWorker(cfg.LogStore, logger, LogWorkerConfig{
+			Broadcaster: s.logBroadcaster,
+		})
+	}
+
 	// Build middleware chain: outermost first.
 	var handler http.Handler = mux
 	handler = ExtractAPIKey(handler)
-	if cfg.LogStore != nil {
-		handler = InteractionCapture(cfg.LogStore)(handler)
+	if s.logWorker != nil {
+		handler = InteractionCapture(s.logWorker)(handler)
 	}
 	// Tenancy auth gates every /api/v1/* route when multi-tenant mode
 	// is enabled. Health, the OpenAI/Anthropic LLM endpoints, and
@@ -157,6 +192,26 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 		mux.Handle("DELETE /api/v1/tenants/{id}", tenancy.RequireRole(tenancy.RoleAdmin, http.HandlerFunc(s.tenancyH.DeleteTenant)))
 		mux.Handle("GET /api/v1/tenants/{id}/keys", tenancy.RequireRole(tenancy.RoleEditor, http.HandlerFunc(s.tenancyH.ListAPIKeys)))
 		mux.Handle("POST /api/v1/tenants/{id}/keys", tenancy.RequireRole(tenancy.RoleAdmin, http.HandlerFunc(s.tenancyH.CreateAPIKey)))
+		// Bulk rotation: emergency response to a tenant-wide
+		// suspected compromise. Rotates every key in the tenant
+		// inside one transaction so operators never end up with a
+		// mix of rotated + unrotated credentials. Admin only.
+		mux.Handle("POST /api/v1/tenants/{id}/keys/rotate", tenancy.RequireRole(tenancy.RoleAdmin, http.HandlerFunc(s.tenancyH.BulkRotateTenantKeys)))
+		mux.Handle("PATCH /api/v1/keys/{id}", tenancy.RequireRole(tenancy.RoleAdmin, http.HandlerFunc(s.tenancyH.UpdateAPIKeyRole)))
+		mux.Handle("POST /api/v1/keys/{id}/rotate", tenancy.RequireRole(tenancy.RoleAdmin, http.HandlerFunc(s.tenancyH.RotateAPIKey)))
+		// Self-rotation: any authenticated principal can rotate
+		// its own secret. Viewer role is sufficient because the
+		// handler reads the caller's key id from the request
+		// context — there's no path parameter to abuse.
+		mux.Handle("POST /api/v1/keys/me/rotate", tenancy.RequireRole(tenancy.RoleViewer, http.HandlerFunc(s.tenancyH.RotateMyAPIKey)))
+		// Rotate-then-burn: rotates the caller's key without
+		// returning the new plaintext. Operators who suspect a
+		// compromised browser session use this to kill their
+		// own credential without the fresh secret ever touching
+		// the compromised machine. Viewer role is fine — same
+		// argument as /me/rotate, the handler only ever touches
+		// its own key.
+		mux.Handle("POST /api/v1/keys/me/burn", tenancy.RequireRole(tenancy.RoleViewer, http.HandlerFunc(s.tenancyH.BurnMyAPIKey)))
 		mux.Handle("DELETE /api/v1/keys/{id}", tenancy.RequireRole(tenancy.RoleAdmin, http.HandlerFunc(s.tenancyH.DeleteAPIKey)))
 	}
 
@@ -184,10 +239,33 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Log query API. Prices is threaded in so rows returned by
 	// ListLogs carry a computed cost_usd field when a pricing table
 	// is configured.
-	logHandlers := &LogHandlers{Store: s.config.LogStore, Prices: s.config.Prices}
+	logHandlers := &LogHandlers{
+		Store:       s.config.LogStore,
+		Prices:      s.config.Prices,
+		Broadcaster: s.logBroadcaster,
+	}
 	mux.HandleFunc("GET /api/v1/logs", logHandlers.ListLogs)
 	mux.HandleFunc("GET /api/v1/logs/{id}", logHandlers.GetLog)
 	mux.HandleFunc("DELETE /api/v1/logs", logHandlers.DeleteLogs)
+	// Live feed via SSE. Only mounted when the broadcaster was
+	// constructed (i.e. when a log store is configured). Nothing
+	// subscribes to the /api/v1/logs/stream endpoint in single-
+	// tenant single-process mode until the GUI's live toggle is on.
+	//
+	// The /metrics sibling endpoint exposes an aggregate snapshot
+	// of every currently-connected subscriber's drop count +
+	// buffer utilization. Admin-gated in multi-tenant so viewers
+	// can't fingerprint the operator's browser tabs.
+	if s.logBroadcaster != nil {
+		mux.HandleFunc("GET /api/v1/logs/stream", logHandlers.StreamLogs)
+		streamMetrics := http.HandlerFunc(logHandlers.StreamMetrics)
+		if s.tenancyH != nil {
+			mux.Handle("GET /api/v1/logs/stream/metrics",
+				tenancy.RequireRole(tenancy.RoleAdmin, streamMetrics))
+		} else {
+			mux.Handle("GET /api/v1/logs/stream/metrics", streamMetrics)
+		}
+	}
 
 	// Cost aggregate endpoint. Silent no-op when the log store is
 	// absent — handler returns 503 in that case, matching the
@@ -195,6 +273,28 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	if s.config.LogStore != nil {
 		costsH := &CostsHandlers{Store: s.config.LogStore, Prices: s.config.Prices}
 		mux.HandleFunc("GET /api/v1/costs", costsH.ListCosts)
+	}
+
+	// Pipeline management API. Read-only list + detail used by the
+	// GUI's /pipelines DAG viewer. The handler returns an empty
+	// list when no registry is wired up, so single-tenant
+	// deployments that never loaded a Pipeline YAML still get a
+	// well-formed response.
+	if s.config.Pipelines != nil {
+		pipelineH := &PipelineHandlers{Registry: s.config.Pipelines}
+		mux.HandleFunc("GET /api/v1/pipelines", pipelineH.ListPipelines)
+		mux.HandleFunc("GET /api/v1/pipelines/{name}", pipelineH.GetPipeline)
+	}
+
+	// Agent config validation endpoint. Open in single-tenant mode
+	// (matches /api/v1/logs); gated behind the editor role in
+	// multi-tenant mode so viewers don't get a free surface for
+	// spraying YAML at the parser.
+	validateH := NewValidateHandler()
+	if s.tenancyH != nil {
+		mux.Handle("POST /api/v1/config/validate", tenancy.RequireRole(tenancy.RoleEditor, validateH))
+	} else {
+		mux.Handle("POST /api/v1/config/validate", validateH)
 	}
 
 	// Generic engine endpoint (internal/testing).
@@ -327,12 +427,29 @@ func (s *Server) ListenAddr() string {
 }
 
 // Shutdown gracefully shuts down the server, waiting up to ShutdownTimeout
-// for in-flight requests to complete.
+// for in-flight requests to complete, then drains any pending
+// interaction-log writes so operators do not lose the last seconds of
+// traffic on a clean exit.
 func (s *Server) Shutdown() error {
 	ctx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 	defer cancel()
 	s.logger.Info("shutting down server", "timeout", ShutdownTimeout)
-	return s.httpServer.Shutdown(ctx)
+	err := s.httpServer.Shutdown(ctx)
+	// Drain the async log worker after the HTTP server has stopped
+	// accepting new requests. Order matters: Submit paths must be
+	// closed first so we know the queue only contains already-enqueued
+	// entries.
+	if s.logWorker != nil {
+		s.logWorker.Shutdown(DefaultLogDrainTimeout)
+		m := s.logWorker.Metrics()
+		s.logger.Info("log worker drained",
+			"submitted", m.Submitted,
+			"written", m.Written,
+			"dropped", m.Dropped,
+			"failed", m.Failed,
+		)
+	}
+	return err
 }
 
 // Addr returns the server's listen address. Useful after ListenAndServe

@@ -11,7 +11,19 @@ import (
 	"github.com/mockagents/mockagents/internal/audit"
 	"github.com/mockagents/mockagents/internal/config"
 	"github.com/mockagents/mockagents/internal/engine"
+	"github.com/mockagents/mockagents/internal/tenancy"
 )
+
+// callerTenantID returns the tenant id of the authenticated principal
+// on the request, or the empty string in single-tenant mode.
+// Centralized here so every control-plane handler scopes the same
+// way and the engine package stays free of any tenancy import.
+func callerTenantID(r *http.Request) string {
+	if p := tenancy.PrincipalFrom(r.Context()); p != nil {
+		return p.TenantID
+	}
+	return ""
+}
 
 // Handlers holds the dependencies for HTTP handler functions.
 type Handlers struct {
@@ -43,9 +55,11 @@ type AgentSummary struct {
 	Tags          []string `json:"tags,omitempty"`
 }
 
-// ListAgents returns a JSON array of agent summaries.
+// ListAgents returns a JSON array of agent summaries scoped to the
+// caller's tenant. In single-tenant mode the caller has no tenant id
+// and the listing returns global agents only — identical to v0.1.
 func (h *Handlers) ListAgents(w http.ResponseWriter, r *http.Request) {
-	agents := h.Engine.Registry.List()
+	agents := h.Engine.Registry.ListForTenant(callerTenantID(r))
 	summaries := make([]AgentSummary, 0, len(agents))
 	for _, a := range agents {
 		summaries = append(summaries, AgentSummary{
@@ -61,14 +75,18 @@ func (h *Handlers) ListAgents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, summaries)
 }
 
-// GetAgent returns the full definition of a single agent.
+// GetAgent returns the full definition of a single agent visible to
+// the caller's tenant. A 404 is returned when the agent exists but
+// belongs to a different tenant — leaking "you are not allowed" via
+// 403 would expose the existence of foreign agent names.
 func (h *Handlers) GetAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	agent := h.Engine.Registry.Get(name)
+	tenantID := callerTenantID(r)
+	agent := h.Engine.Registry.GetForTenant(name, tenantID)
 	if agent == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{
-			"error":           fmt.Sprintf("agent %q not found", name),
-			"available_agents": h.Engine.Registry.ListNames(),
+			"error":            fmt.Sprintf("agent %q not found", name),
+			"available_agents": h.Engine.Registry.ListNamesForTenant(tenantID),
 		})
 		return
 	}
@@ -76,10 +94,13 @@ func (h *Handlers) GetAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // ReloadAgent re-reads an agent's YAML from disk, validates, and replaces in-memory.
+// Tenant-scoped: a caller from tenant A cannot reload tenant B's
+// agents, even if they know the name.
 func (h *Handlers) ReloadAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	tenantID := callerTenantID(r)
 
-	existing := h.Engine.Registry.Get(name)
+	existing := h.Engine.Registry.GetForTenant(name, tenantID)
 	if existing == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{
 			"error": fmt.Sprintf("agent %q not found", name),

@@ -269,3 +269,125 @@ func TestRequireRolePassesExactMatch(t *testing.T) {
 		t.Errorf("status = %d, want 200", rec.Code)
 	}
 }
+
+// TestDenialHook_AuthMiddleware verifies that both the missing-key
+// and invalid-key rejection paths in AuthMiddleware fire the denial
+// hook with the correct status and a human-readable reason.
+func TestDenialHook_AuthMiddleware(t *testing.T) {
+	store := newTestStore(t)
+
+	type denial struct {
+		path   string
+		status int
+		reason string
+	}
+	var got []denial
+	SetDenialHook(func(r *http.Request, status int, reason string) {
+		got = append(got, denial{path: r.URL.Path, status: status, reason: reason})
+	})
+	t.Cleanup(func() { SetDenialHook(nil) })
+
+	handler := AuthMiddleware(store, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Missing credentials.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	// Invalid credentials.
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/keys/abc", nil)
+	req.Header.Set("Authorization", "Bearer mak_not_a_real_key_99")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 denial events, got %d: %+v", len(got), got)
+	}
+	if got[0].status != http.StatusUnauthorized || got[0].reason != "missing credentials" {
+		t.Errorf("first denial wrong: %+v", got[0])
+	}
+	if got[1].status != http.StatusUnauthorized || got[1].reason != "invalid api key" {
+		t.Errorf("second denial wrong: %+v", got[1])
+	}
+}
+
+// TestDenialHook_RequireRole verifies that the 403 path through
+// RequireRole fires the denial hook with the caller's actual role
+// embedded in the reason.
+func TestDenialHook_RequireRole(t *testing.T) {
+	store := newTestStore(t)
+	key := mustCreateKey(t, store, RoleViewer)
+
+	var got int
+	var gotReason string
+	SetDenialHook(func(r *http.Request, status int, reason string) {
+		got = status
+		gotReason = reason
+	})
+	t.Cleanup(func() { SetDenialHook(nil) })
+
+	inner := RequireRole(RoleAdmin, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	handler := AuthMiddleware(store, nil)(inner)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/tenants/42", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got != http.StatusForbidden {
+		t.Errorf("denial status = %d, want 403", got)
+	}
+	if gotReason == "" || !contains(gotReason, "viewer") || !contains(gotReason, "admin") {
+		t.Errorf("denial reason missing role transition: %q", gotReason)
+	}
+}
+
+// TestUpdateAPIKeyRole_RoundTrip exercises the new
+// UpdateAPIKeyRole store method: promote viewer -> admin, verify the
+// previous role comes back, and confirm subsequent Resolve reflects
+// the new permission.
+func TestUpdateAPIKeyRole_RoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	tenant, err := store.CreateTenant(ctx, "acme")
+	if err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	result, err := store.CreateAPIKey(ctx, tenant.ID, "promoter", RoleViewer)
+	if err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+
+	prev, next, err := store.UpdateAPIKeyRole(ctx, result.Key.ID, RoleAdmin)
+	if err != nil {
+		t.Fatalf("UpdateAPIKeyRole: %v", err)
+	}
+	if prev != RoleViewer || next != RoleAdmin {
+		t.Errorf("transition = %q -> %q, want viewer -> admin", prev, next)
+	}
+
+	principal, err := store.Resolve(ctx, result.Plaintext)
+	if err != nil {
+		t.Fatalf("Resolve after update: %v", err)
+	}
+	if principal.Role != RoleAdmin {
+		t.Errorf("principal.Role = %q after promotion, want admin", principal.Role)
+	}
+
+	if _, _, err := store.UpdateAPIKeyRole(ctx, "no-such-id", RoleEditor); err == nil {
+		t.Error("expected ErrNotFound for unknown id")
+	}
+}
+
+func contains(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
+}

@@ -8,7 +8,7 @@ from typing import Any, Generator, Optional
 
 import requests
 
-from .types import ChatResponse, ToolCall, TokenUsage
+from .types import ChatResponse, StreamChunk, ToolCall, TokenUsage
 
 
 class MockAgentClient:
@@ -113,6 +113,120 @@ class MockAgentClient:
                 yield json.loads(data)
             except json.JSONDecodeError:
                 continue
+
+    def message_stream(
+        self,
+        messages: list[dict[str, Any]],
+        model: str = "claude-sonnet-4-20250514",
+        max_tokens: int = 1024,
+        system: Optional[str] = None,
+        session_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Generator[dict[str, Any], None, None]:
+        """Stream Anthropic Messages events.
+
+        Mirrors :meth:`chat_stream` but for the Anthropic wire format.
+        Yields parsed event dictionaries (``message_start``,
+        ``content_block_start``, ``content_block_delta``,
+        ``content_block_stop``, ``message_delta``, ``message_stop``).
+        Stops once a ``message_stop`` event is seen.
+
+        Use :meth:`iter_stream` if you want a protocol-agnostic
+        :class:`StreamChunk` view instead of raw event dicts.
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if system:
+            payload["system"] = system
+        payload.update(kwargs)
+
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "X-Api-Key": "mock-api-key",
+            "Anthropic-Version": "2023-06-01",
+        }
+        if session_id:
+            headers["X-Session-Id"] = session_id
+
+        resp = self._session.post(
+            f"{self.base_url}/v1/messages",
+            json=payload,
+            headers=headers,
+            timeout=self.timeout,
+            stream=True,
+        )
+        resp.raise_for_status()
+
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            # Anthropic SSE frames look like:
+            #   event: content_block_delta
+            #   data: {...}
+            # We only care about data lines; the event: line is
+            # informational because the type is also embedded in the
+            # JSON payload.
+            if line.startswith("event: "):
+                continue
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            yield event
+            if event.get("type") == "message_stop":
+                return
+
+    def iter_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        protocol: str = "openai",
+        model: Optional[str] = None,
+        session_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Generator[StreamChunk, None, None]:
+        """Iterate a streamed completion as protocol-agnostic
+        :class:`StreamChunk` objects.
+
+        ``protocol`` selects the wire format ("openai" or "anthropic").
+        The default model is picked per-protocol when ``model`` is
+        omitted, so the simplest call is::
+
+            for chunk in client.iter_stream(messages, protocol="anthropic"):
+                print(chunk.text, end="", flush=True)
+
+        Each chunk has a ``text`` delta (empty for non-text events),
+        an optional ``tool_call_delta`` triple, a ``finish_reason``
+        on the terminal chunk, and a ``finished`` flag so callers can
+        ``break`` without inspecting strings.
+        """
+        if protocol == "openai":
+            chunks = self.chat_stream(
+                messages=messages,
+                model=model or "gpt-4o",
+                session_id=session_id,
+                **kwargs,
+            )
+            yield from _normalize_openai_stream(chunks)
+        elif protocol == "anthropic":
+            chunks = self.message_stream(
+                messages=messages,
+                model=model or "claude-sonnet-4-20250514",
+                session_id=session_id,
+                **kwargs,
+            )
+            yield from _normalize_anthropic_stream(chunks)
+        else:
+            raise ValueError(
+                f"unknown protocol {protocol!r}; expected 'openai' or 'anthropic'"
+            )
 
     def message(
         self,
@@ -399,3 +513,121 @@ class MockAgentClient:
             status_code=resp.status_code,
             latency_ms=latency_ms,
         )
+
+
+# --- Stream normalizers (module-level, exercised by iter_stream) ---
+
+
+def _normalize_openai_stream(
+    chunks: Generator[dict[str, Any], None, None],
+) -> Generator[StreamChunk, None, None]:
+    """Convert raw OpenAI Chat Completions chunks to StreamChunks.
+
+    Each ``choices[0].delta.content`` becomes a StreamChunk with the
+    text delta. Tool-call deltas are passed through as
+    ``(index, name, arguments_fragment)`` triples. The final chunk
+    carries ``finish_reason`` (e.g. "stop", "tool_calls") and
+    ``finished=True``.
+    """
+    for chunk in chunks:
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = choice.get("delta", {}) or {}
+
+        text = delta.get("content") or ""
+
+        tool_call_delta: Optional[tuple[int, str, str]] = None
+        for tc in delta.get("tool_calls", []) or []:
+            idx = int(tc.get("index", 0))
+            func = tc.get("function", {}) or {}
+            tool_call_delta = (
+                idx,
+                func.get("name", "") or "",
+                func.get("arguments", "") or "",
+            )
+            # Multiple tool-call deltas in one chunk are rare; take
+            # the first and let the rest stream in subsequent chunks.
+            break
+
+        finish_reason = choice.get("finish_reason") or ""
+        finished = bool(finish_reason)
+
+        # Skip empty padding chunks (no text, no tool delta, no finish).
+        if not text and tool_call_delta is None and not finished:
+            continue
+
+        yield StreamChunk(
+            text=text,
+            tool_call_delta=tool_call_delta,
+            finish_reason=finish_reason,
+            finished=finished,
+            raw=chunk,
+        )
+
+
+def _normalize_anthropic_stream(
+    events: Generator[dict[str, Any], None, None],
+) -> Generator[StreamChunk, None, None]:
+    """Convert raw Anthropic Messages events to StreamChunks.
+
+    Anthropic streams a richer event vocabulary than OpenAI; this
+    normalizer collapses it to the same StreamChunk shape:
+
+    - ``content_block_delta`` of type ``text_delta`` -> text chunk.
+    - ``content_block_delta`` of type ``input_json_delta`` -> tool
+      call delta with the running JSON fragment.
+    - ``content_block_start`` of type ``tool_use`` -> tool call delta
+      with the tool name (no arguments yet).
+    - ``message_delta`` and ``message_stop`` -> finish_reason on the
+      terminal chunk.
+    """
+    current_tool_index = -1
+    current_tool_name = ""
+    final_stop = ""
+    for event in events:
+        et = event.get("type", "")
+
+        if et == "content_block_start":
+            block = event.get("content_block", {}) or {}
+            if block.get("type") == "tool_use":
+                current_tool_index = int(event.get("index", current_tool_index + 1))
+                current_tool_name = block.get("name", "") or ""
+                yield StreamChunk(
+                    tool_call_delta=(current_tool_index, current_tool_name, ""),
+                    raw=event,
+                )
+
+        elif et == "content_block_delta":
+            delta = event.get("delta", {}) or {}
+            dt = delta.get("type", "")
+            if dt == "text_delta":
+                text = delta.get("text", "") or ""
+                if text:
+                    yield StreamChunk(text=text, raw=event)
+            elif dt == "input_json_delta":
+                fragment = delta.get("partial_json", "") or ""
+                if fragment:
+                    yield StreamChunk(
+                        tool_call_delta=(
+                            current_tool_index,
+                            current_tool_name,
+                            fragment,
+                        ),
+                        raw=event,
+                    )
+
+        elif et == "message_delta":
+            delta = event.get("delta", {}) or {}
+            stop = delta.get("stop_reason") or ""
+            if stop:
+                final_stop = stop
+
+        elif et == "message_stop":
+            yield StreamChunk(
+                finish_reason=final_stop or "end_turn",
+                finished=True,
+                raw=event,
+            )
+            return

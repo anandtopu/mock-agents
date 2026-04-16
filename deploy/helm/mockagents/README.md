@@ -1,9 +1,11 @@
-# mockagents Helm chart
+# mockagents Helm chart (v0.2)
 
 Deploy [MockAgents](https://github.com/mockagents/mockagents) on
 Kubernetes. The chart runs the existing Docker image as a non-root
 Deployment, exposes it via a Service, and mounts agent definitions from
-a ConfigMap.
+a ConfigMap. v0.2 adds opt-in HPA, PDB, NetworkPolicy, and a
+Prometheus Operator ServiceMonitor — all off by default so the
+upgrade from v0.1 → v0.2 is a no-op for existing users.
 
 ## Install
 
@@ -71,6 +73,10 @@ in the NOTES in that case.
 | `env.OTEL_EXPORTER_OTLP_ENDPOINT`    | Ship traces to an OTLP/HTTP collector.                   |
 | `logLevel`                           | `debug`, `info`, `warn`, `error`.                        |
 | `extraArgs`                          | Extra flags appended to `mockagents start`.              |
+| `autoscaling.enabled`                | **v0.2** — render an HPA (`autoscaling/v2`) targeting CPU and/or memory. |
+| `podDisruptionBudget.enabled`        | **v0.2** — render a PDB so node drains can't take every replica at once. |
+| `networkPolicy.enabled`              | **v0.2** — render a NetworkPolicy locking down ingress + egress. |
+| `serviceMonitor.enabled`             | **v0.2** — render a Prometheus Operator ServiceMonitor for `/metrics`. |
 
 ## Verify before installing
 
@@ -85,9 +91,36 @@ helm template demo ./deploy/helm/mockagents -f my-values.yaml | kubectl apply --
 helm uninstall demo
 ```
 
-## What's not in v0.1
+## What's new in v0.2
 
-- No HorizontalPodAutoscaler (straightforward to add via `autoscaling.enabled`).
-- No NetworkPolicy (bring your own cluster defaults).
-- No ServiceMonitor (OTel tracing is wired via env vars; a Prometheus
-  metrics endpoint is a separate slice).
+- **HorizontalPodAutoscaler** — opt in with `autoscaling.enabled=true`.
+  Targets CPU utilization by default; supports memory utilization,
+  configurable min/max replicas, and a passthrough `behavior` block
+  for stabilization windows. Renders against `autoscaling/v2`.
+- **PodDisruptionBudget** — opt in with
+  `podDisruptionBudget.enabled=true`. Off by default because the
+  default `replicaCount` is 1 (a `minAvailable: 1` PDB would block
+  drains entirely); flip it on once you raise replicas or enable
+  autoscaling.
+- **NetworkPolicy** — opt in with `networkPolicy.enabled=true`.
+  Three knobs: `allowSameNamespace` (default true),
+  `allowExternalIngress` for cluster-wide controllers, and
+  user-supplied `ingressFrom` / `egressRules` arrays. DNS egress
+  is allowed by default via `allowDNS`.
+- **ServiceMonitor** — opt in with `serviceMonitor.enabled=true`.
+  Requires the Prometheus Operator CRDs; defaults to a 30s scrape
+  interval against the named `http` port. Forwards user-supplied
+  `relabelings` / `metricRelabelings` / extra `labels` so the right
+  Prometheus instance picks it up.
+
+All four are off by default. With every flag enabled, `helm template`
+renders 10 resources; defaults still render the same 6 as v0.1.
+
+## What's still deferred
+
+- A real `/metrics` endpoint on the Go binary. Today the
+  ServiceMonitor scrapes whatever the binary exposes (currently
+  Go runtime + log worker counters via expvar); a richer
+  Prometheus surface is its own slice.
+- Cluster-tier RBAC + admission controls — bring your own cluster
+  defaults via `existingConfigMap` for tenancy bootstrap secrets.

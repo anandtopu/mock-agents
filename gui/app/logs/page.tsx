@@ -1,12 +1,40 @@
 import Link from "next/link";
 
-import { APIError, InteractionLog, listLogs } from "@/lib/api";
+import { APIError, InteractionLog, listAgents, listLogs } from "@/lib/api";
 
-export default async function LogsPage() {
+import { AutoRefreshLogs } from "./AutoRefreshLogs";
+import { LogsTable } from "./LogsTable";
+
+export const dynamic = "force-dynamic";
+
+interface LogsPageSearchParams {
+  agent?: string;
+  since?: string;
+  limit?: string;
+  live?: string;
+}
+
+export default async function LogsPage({
+  searchParams,
+}: {
+  searchParams: Promise<LogsPageSearchParams>;
+}) {
+  const params = await searchParams;
+  const limit = clampLimit(params.limit);
+  const agent = params.agent || "";
+  const since = params.since || "";
+  const live = params.live === "1";
+
   let logs: InteractionLog[] = [];
+  let agents: string[] = [];
   let error: string | null = null;
   try {
-    logs = await listLogs({ limit: 50 });
+    const [rows, allAgents] = await Promise.all([
+      listLogs({ limit, agent: agent || undefined, since: since || undefined }),
+      listAgents(),
+    ]);
+    logs = rows;
+    agents = allAgents.map((a) => a.name);
   } catch (err) {
     error = err instanceof APIError ? err.message : "unknown error";
   }
@@ -15,8 +43,51 @@ export default async function LogsPage() {
     <div>
       <h1 className="page-title">Interaction logs</h1>
       <p className="page-lede">
-        The 50 most recent request/response pairs recorded by the running server.
+        Recent request/response pairs recorded by the running server.
+        Use the filters to narrow the view; click a row to drill in.
       </p>
+
+      <form className="filters" action="/logs" method="get">
+        <label>
+          Agent
+          <select name="agent" defaultValue={agent}>
+            <option value="">All agents</option>
+            {agents.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Since (RFC3339)
+          <input
+            type="text"
+            name="since"
+            placeholder="2026-04-14T00:00:00Z"
+            defaultValue={since}
+          />
+        </label>
+        <label>
+          Limit
+          <select name="limit" defaultValue={String(limit)}>
+            <option value="25">25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+            <option value="250">250</option>
+          </select>
+        </label>
+        <label className="toggle">
+          <input type="checkbox" name="live" value="1" defaultChecked={live} />
+          Live (auto-refresh every 3s)
+        </label>
+        <button type="submit">Apply</button>
+        {(agent || since || live) && (
+          <Link href="/logs" className="muted">
+            reset
+          </Link>
+        )}
+      </form>
 
       {error && (
         <div className="banner banner-error">
@@ -24,50 +95,25 @@ export default async function LogsPage() {
         </div>
       )}
 
-      {!error && logs.length === 0 && (
+      {!error && logs.length === 0 && !live && (
         <div className="empty">
-          No interactions yet. Point a client at the MockAgents server and come back.
+          No interactions match the current filter. Point a client at
+          the MockAgents server and refresh.
         </div>
       )}
 
-      <div className="table-wrap">
-        {logs.length > 0 && (
-          <table className="log-table">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Agent</th>
-                <th>Protocol</th>
-                <th>Scenario</th>
-                <th>Status</th>
-                <th>Latency</th>
-              </tr>
-            </thead>
-            <tbody>
-              {logs.map((log) => (
-                <tr key={log.id}>
-                  <td>{formatTimestamp(log.timestamp)}</td>
-                  <td>
-                    <Link href={`/agents/${log.agent_name}`}>{log.agent_name}</Link>
-                  </td>
-                  <td>
-                    <code>{log.protocol}</code>
-                  </td>
-                  <td>{log.scenario_name || <span className="muted">—</span>}</td>
-                  <td>{log.status_code ?? "—"}</td>
-                  <td>{log.latency_ms !== undefined ? `${log.latency_ms.toFixed(1)} ms` : "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {live ? (
+        <AutoRefreshLogs initialLogs={logs} agent={agent} since={since} limit={limit} />
+      ) : (
+        <LogsTable logs={logs} />
+      )}
     </div>
   );
 }
 
-function formatTimestamp(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString();
+function clampLimit(raw: string | undefined): number {
+  const n = raw ? Number(raw) : 50;
+  if (!Number.isFinite(n) || n <= 0) return 50;
+  if (n > 1000) return 1000;
+  return Math.floor(n);
 }

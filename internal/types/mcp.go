@@ -24,6 +24,7 @@ type MCPServerSpec struct {
 	Tools           []MCPTool       `yaml:"tools,omitempty" json:"tools,omitempty"`
 	Resources       []MCPResource   `yaml:"resources,omitempty" json:"resources,omitempty"`
 	Prompts         []MCPPrompt     `yaml:"prompts,omitempty" json:"prompts,omitempty"`
+	Completions     []MCPCompletion `yaml:"completions,omitempty" json:"completions,omitempty"`
 }
 
 // MCPCapabilities controls which sections the server advertises during
@@ -92,4 +93,22 @@ type MCPPromptArg struct {
 type MCPPromptMessage struct {
 	Role    string          `yaml:"role" json:"role"`
 	Content MCPContentBlock `yaml:"content" json:"content"`
+}
+
+// MCPCompletion describes the autocomplete suggestions the mock
+// returns for `completion/complete` requests. Each entry binds a
+// (refType, refName, argName) triple — matching the MCP spec's
+// `ref` / `argument` shape — to a static list of values. When the
+// incoming argument value is non-empty the mock filters the list
+// with a case-insensitive prefix match, mirroring how a real server
+// would scope suggestions to what the user has typed so far.
+type MCPCompletion struct {
+	// RefType is "ref/prompt" or "ref/resource". Empty matches both.
+	RefType string `yaml:"refType,omitempty" json:"refType,omitempty"`
+	// RefName is the prompt or resource template name. Empty matches any.
+	RefName string `yaml:"refName,omitempty" json:"refName,omitempty"`
+	// ArgName is the argument the suggestions belong to.
+	ArgName string `yaml:"argName" json:"argName"`
+	// Values is the static list of candidate completions.
+	Values []string `yaml:"values" json:"values"`
 }

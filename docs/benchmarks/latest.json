@@ -1,0 +1,104 @@
+{
+  "schema_version": "1",
+  "timestamp": "2026-04-14T22:06:20.1813803Z",
+  "go_version": "go1.26.1",
+  "goos": "windows",
+  "goarch": "amd64",
+  "package": "./internal/engine/...",
+  "results": [
+    {
+      "name": "BenchmarkProcessRequest_StaticResponse",
+      "iterations": 2355136,
+      "ns_per_op": 500.8,
+      "bytes_per_op": 1419,
+      "allocs_per_op": 9,
+      "ops_per_second": 1996805.1118210861
+    },
+    {
+      "name": "BenchmarkProcessRequest_TemplateResponse",
+      "iterations": 843751,
+      "ns_per_op": 1309,
+      "bytes_per_op": 1804,
+      "allocs_per_op": 22,
+      "ops_per_second": 763941.9404125287
+    },
+    {
+      "name": "BenchmarkProcessRequest_WithToolCalls",
+      "iterations": 632170,
+      "ns_per_op": 1815,
+      "bytes_per_op": 1949,
+      "allocs_per_op": 23,
+      "ops_per_second": 550964.1873278237
+    },
+    {
+      "name": "BenchmarkProcessRequest_RegexMatch",
+      "iterations": 1490695,
+      "ns_per_op": 794,
+      "bytes_per_op": 1837,
+      "allocs_per_op": 14,
+      "ops_per_second": 1259445.8438287154
+    },
+    {
+      "name": "BenchmarkProcessRequest_DefaultFallback",
+      "iterations": 2080149,
+      "ns_per_op": 569,
+      "bytes_per_op": 1327,
+      "allocs_per_op": 9,
+      "ops_per_second": 1757469.244288225
+    },
+    {
+      "name": "BenchmarkScenarioMatcher_ContentContains",
+      "iterations": 49515980,
+      "ns_per_op": 28.81,
+      "bytes_per_op": 16,
+      "allocs_per_op": 1,
+      "ops_per_second": 34710170.079833396
+    },
+    {
+      "name": "BenchmarkScenarioMatcher_Regex",
+      "iterations": 2564556,
+      "ns_per_op": 564,
+      "bytes_per_op": 439,
+      "allocs_per_op": 6,
+      "ops_per_second": 1773049.645390071
+    },
+    {
+      "name": "BenchmarkScenarioMatcher_Default",
+      "iterations": 11981751,
+      "ns_per_op": 102.8,
+      "bytes_per_op": 16,
+      "allocs_per_op": 1,
+      "ops_per_second": 9727626.459143968
+    },
+    {
+      "name": "BenchmarkResponseGenerator_Static",
+      "iterations": 8478790,
+      "ns_per_op": 160.5,
+      "bytes_per_op": 144,
+      "allocs_per_op": 1,
+      "ops_per_second": 6230529.595015576
+    },
+    {
+      "name": "BenchmarkResponseGenerator_Template",
+      "iterations": 1331271,
+      "ns_per_op": 924.3,
+      "bytes_per_op": 625,
+      "allocs_per_op": 14,
+      "ops_per_second": 1081899.8160770314
+    },
+    {
+      "name": "BenchmarkToolCallProcessor",
+      "iterations": 1000000,
+      "ns_per_op": 1195,
+      "bytes_per_op": 558,
+      "allocs_per_op": 12,
+      "ops_per_second": 836820.0836820083
+    },
+    {
+      "name": "BenchmarkAgentRegistry_Get",
+      "iterations": 93082424,
+      "ns_per_op": 13.95,
+      "ops_per_second": 71684587.81362008
+    }
+  ]
+}

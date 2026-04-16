@@ -23,3 +23,8 @@ Requires-Dist: pytest>=7.0; extra == "dev"
 Requires-Dist: pytest-cov>=4.0; extra == "dev"
 Requires-Dist: ruff>=0.4.0; extra == "dev"
 Requires-Dist: responses>=0.25.0; extra == "dev"
+Provides-Extra: langchain
+Requires-Dist: langchain-openai>=0.2.0; extra == "langchain"
+Requires-Dist: langchain-anthropic>=0.2.0; extra == "langchain"
+Provides-Extra: crewai
+Requires-Dist: crewai>=0.80.0; extra == "crewai"

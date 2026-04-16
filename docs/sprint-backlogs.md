@@ -1,10 +1,45 @@
 # MockAgents -- Sprint Backlogs
 
-**Version:** 1.0
-**Date:** April 7, 2026
-**Status:** Draft
+**Version:** 1.2
+**Date:** April 15, 2026
+**Status:** Sprints 1–6 complete; Phase 4 v0.2 + v0.3 work tracked in PROGRESS.md
 **Author:** Engineering Team
-**Related:** [Implementation Plan](./implementation-plan.md) | [PRD](./PRD.md)
+**Related:** [Implementation Plan](./implementation-plan.md) | [PRD](./PRD.md) | [PROGRESS.md](./PROGRESS.md)
+
+---
+
+## Active Sprint (post-MVP, 2026-04-15)
+
+> **Read PROGRESS.md §1A "Resume Notes" first.** That section is
+> the authoritative handoff for any future work. The original
+> Sprint 1–6 tables below are kept for historical reference but
+> every story in them is closed.
+
+The original 6-sprint MVP plan is **complete**. Phase 4 v0.2 and
+v0.3 slices all landed since the v0.1 freeze and are ledgered as
+PROGRESS.md §§2.17–2.37:
+
+- **v0.2** — perf workstream (§§2.18–2.24), Python + TS SDK
+  streaming, GUI v0.2 (costs/audit/log-detail/live-feed-polling),
+  Helm v0.2 (HPA/PDB/NetworkPolicy/ServiceMonitor), MCP v0.2
+  (completion/logging/notifications), tenant-scoped agent isolation.
+- **v0.3** — Go SDK streaming + in-process engine mode (§2.31),
+  GUI admin auth with cookie-backed sessions (§2.32), MCP v0.3
+  bidirectional transport for sampling/roots (§2.33), GUI live
+  feed via real server-sent events (§2.34), schema-aware config
+  editor (§2.35), pipeline DAG viewer + mgmt API (§2.36), API
+  key rotation (§2.37).
+
+**Recommended next slices** (per PROGRESS.md §1A), in declining
+ROI order:
+
+1. **GUI v0.3 workflow editor** — drag-to-rewire for
+   `kind: Pipeline`. The read-only DAG viewer shipped in §2.36;
+   the editor needs a DAG widget (React Flow or similar) and a
+   YAML round-trip layer.
+2. **SaaS-tier multi-tenancy** — Postgres tenancy store, SSO/OAuth,
+   per-tenant agent name collisions, billing/quotas. Needs design
+   discussion before implementation.
 
 ---
 
@@ -728,14 +763,14 @@
 | S6-03a | Test with `anthropic` Python package: basic messages | S6-03 | BE-2 | 0.25 | P0 | TODO | S4-06 | `anthropic.Anthropic().messages.create()` succeeds |
 | S6-03b | Test with `anthropic`: streaming, tool_use, tool_result | S6-03 | BE-2 | 0.5 | P0 | TODO | S6-03a | All major Anthropic SDK features work against mock |
 | S6-03c | Test with `anthropic`: error handling | S6-03 | BE-2 | 0.25 | P1 | TODO | S6-03a | SDK raises expected exceptions for error responses |
-| S6-04a | Set up benchmarking harness with `hey` or `wrk` | S6-04 | BE-3 | 0.5 | P0 | TODO | -- | Benchmark script that targets `/v1/chat/completions` |
-| S6-04b | Benchmark non-streaming single-agent: measure req/s and p99 latency | S6-04 | BE-3 | 0.5 | P0 | TODO | S6-04a | Results documented; target: 1000 req/s |
-| S6-04c | Benchmark streaming single-agent: measure throughput | S6-04 | BE-3 | 0.25 | P0 | TODO | S6-04a | Streaming throughput measured and documented |
-| S6-04d | Benchmark multi-agent routing: measure overhead | S6-04 | BE-3 | 0.25 | P1 | TODO | S6-04a | Routing overhead < 1ms per request |
-| S6-05a | Profile with pprof: identify CPU hot paths | S6-05 | BE-3 | 0.5 | P0 | TODO | S6-04b | pprof flame graph shows top 5 hot paths |
-| S6-05b | Optimize identified bottlenecks | S6-05 | BE-3 | 0.5 | P0 | TODO | S6-05a | Re-benchmark shows improvement; target met |
-| S6-05c | Profile memory: identify allocations in hot path | S6-05 | BE-3 | 0.25 | P1 | TODO | S6-05a | No unnecessary allocations in request path |
-| S6-05d | Re-run benchmarks and document final results | S6-05 | BE-3 | 0.25 | P0 | TODO | S6-05b | Before/after comparison documented |
+| S6-04a | Go `testing.B` harness wired at `internal/engine/benchmark_test.go` | S6-04 | BE-3 | 0.5 | P0 | DONE | -- | 12 benchmarks covering engine hot path |
+| S6-04b | Non-streaming single-agent latency benchmarks | S6-04 | BE-3 | 0.5 | P0 | DONE | S6-04a | Static p50 ≈ 595 ns/op, template 1617 ns/op; see `docs/benchmarks/latest.md` |
+| S6-04c | Per-component benchmarks (matcher/generator/tools/registry) | S6-04 | BE-3 | 0.25 | P0 | DONE | S6-04a | ContentContains 76 ns/op, registry 14 ns/op |
+| S6-04d | Reproducible CI-friendly report | S6-04 | BE-3 | 0.25 | P1 | DONE | S6-04a | `make bench-report` emits `docs/benchmarks/latest.{json,md}` |
+| S6-05a | pprof CPU profile of static-response pipeline | S6-05 | BE-3 | 0.5 | P0 | DONE | S6-04b | Top hotspots in `docs/benchmarks/README.md` Release 2026-04-14 notes |
+| S6-05b | Investigate bottlenecks | S6-05 | BE-3 | 0.5 | P0 | DONE | S6-05a | GC-bound profile; all benchmarks inside target envelope, no regressions to fix |
+| S6-05c | Allocation analysis | S6-05 | BE-3 | 0.25 | P1 | DONE | S6-05a | `B/op` + `allocs/op` columns in `latest.md`; Session.AppendUserMessage flagged as next lever |
+| S6-05d | Archive results for future diffs | S6-05 | BE-3 | 0.25 | P0 | DONE | S6-05b | `docs/benchmarks/latest.json` schema v1 committed |
 | S6-06a | Audit input validation on all HTTP endpoints | S6-06 | BE-1 | 0.25 | P0 | TODO | -- | All user input validated; no injection vectors |
 | S6-06b | Check for path traversal in agent file loading | S6-06 | BE-1 | 0.25 | P0 | TODO | -- | Agent directory is sandboxed; `../` in paths rejected |
 | S6-07a | Audit all error returns for context wrapping | S6-07 | BE-1 | 0.25 | P0 | TODO | -- | All errors wrapped with `fmt.Errorf("context: %w", err)` |

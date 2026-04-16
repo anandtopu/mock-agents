@@ -23,9 +23,11 @@ var DefaultCaptureHeaders = []string{
 
 // Proxy is an HTTP handler that forwards incoming requests to an upstream
 // base URL, writes the exchange to a cassette, and returns the upstream
-// response verbatim. Streaming is not supported in v1: requests with
-// `"stream": true` in their body are forwarded but the response is
-// buffered in memory, so cassettes are always JSON.
+// response verbatim. Streaming SSE responses are tee'd: each chunk is
+// flushed to the client as it arrives and simultaneously appended to the
+// captured Interaction.StreamEvents list, with DelayMs recording the
+// offset from the start of the response so Replay can optionally
+// re-honor the pacing.
 type Proxy struct {
 	Upstream *url.URL
 	Cassette *Cassette
@@ -34,6 +36,12 @@ type Proxy struct {
 	// header with "Bearer <key>" on forwarded requests. Useful for routing
 	// recordings through a dedicated budget key.
 	UpstreamAPIKey string
+}
+
+// isSSE reports whether a Content-Type value indicates a Server-Sent
+// Events stream.
+func isSSE(contentType string) bool {
+	return strings.HasPrefix(strings.ToLower(contentType), "text/event-stream")
 }
 
 // NewProxy builds a Proxy against the given upstream base URL.
@@ -79,6 +87,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upstreamResp.Body.Close()
 
+	// Streaming path: tee each chunk into the cassette while flushing
+	// to the client. We intentionally do not buffer the whole body —
+	// clients that consume SSE expect incremental arrivals.
+	if isSSE(upstreamResp.Header.Get("Content-Type")) {
+		p.serveStreaming(w, r, body, upstreamResp)
+		return
+	}
+
 	respBody, err := io.ReadAll(upstreamResp.Body)
 	if err != nil {
 		http.Error(w, "reading upstream response: "+err.Error(), http.StatusBadGateway)
@@ -103,6 +119,72 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w.Header(), upstreamResp.Header)
 	w.WriteHeader(upstreamResp.StatusCode)
 	_, _ = w.Write(respBody)
+}
+
+// serveStreaming copies SSE chunks from upstreamResp to the client and
+// captures each chunk as an Interaction.StreamEvent. Headers are
+// flushed before any chunk so clients that rely on Content-Type (every
+// SSE client) see it before the first event. Append happens after the
+// stream finishes so a half-closed upstream still produces a usable
+// (partial) cassette entry.
+func (p *Proxy) serveStreaming(w http.ResponseWriter, r *http.Request, reqBody []byte, upstreamResp *http.Response) {
+	copyHeaders(w.Header(), upstreamResp.Header)
+	w.WriteHeader(upstreamResp.StatusCode)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	var events []StreamEvent
+	start := time.Now()
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := upstreamResp.Body.Read(buf)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			if _, werr := w.Write(chunk); werr != nil {
+				// Client disconnected; stop streaming but still save
+				// what we captured so the partial recording is useful.
+				events = append(events, StreamEvent{
+					DelayMs: time.Since(start).Milliseconds(),
+					Data:    string(chunk),
+				})
+				break
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			events = append(events, StreamEvent{
+				DelayMs: time.Since(start).Milliseconds(),
+				Data:    string(chunk),
+			})
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			// Surface the upstream read error as a trailing header on
+			// the cassette entry; the client has already seen whatever
+			// bytes we managed to forward.
+			w.Header().Set("X-Mockagents-Upstream-Error", rerr.Error())
+			break
+		}
+	}
+
+	it := &Interaction{
+		Method:          r.Method,
+		Path:            r.URL.Path,
+		RequestHeaders:  CaptureHeaders(r.Header, DefaultCaptureHeaders),
+		RequestBody:     reqBody,
+		ResponseStatus:  upstreamResp.StatusCode,
+		ResponseHeaders: CaptureHeaders(upstreamResp.Header, DefaultCaptureHeaders),
+		Streaming:       true,
+		StreamEvents:    events,
+	}
+	if err := p.Cassette.Append(it); err != nil {
+		w.Header().Set("X-Mockagents-Record-Error", err.Error())
+	}
 }
 
 // copyHeaders duplicates src into dst, dropping hop-by-hop headers.

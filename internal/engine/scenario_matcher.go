@@ -65,18 +65,28 @@ func (m *ScenarioMatcher) MatchWithCaptures(scenarios []types.Scenario, userMess
 	return nil
 }
 
+// matchedSentinel is returned by evaluate() when a rule matches but
+// carries no capture groups. A single shared non-nil map lets callers
+// distinguish "matched with nothing" from "did not match" without
+// allocating a fresh empty map on every successful content_contains
+// match. The sentinel is deliberately unexported and never written to.
+var matchedSentinel = map[string]string{}
+
 // evaluate checks all match conditions (AND logic).
 // Returns the capture groups map if matched, nil if not matched.
-// An empty non-nil map means "matched with no captures".
+// A non-nil empty map (matchedSentinel) means "matched with no captures".
+//
+// The captures map is allocated lazily — only when a content_regex
+// rule with named groups actually matches. ContentContains-only
+// scenarios (the common case) pay zero map allocations.
 func (m *ScenarioMatcher) evaluate(rule *types.MatchRule, userMessage string, turnNumber int) map[string]string {
-	captures := make(map[string]string)
-
 	if rule.ContentContains != "" {
 		if !strings.Contains(strings.ToLower(userMessage), strings.ToLower(rule.ContentContains)) {
 			return nil
 		}
 	}
 
+	var captures map[string]string
 	if rule.ContentRegex != "" {
 		re := m.compileRegex(rule.ContentRegex)
 		if re == nil {
@@ -86,9 +96,14 @@ func (m *ScenarioMatcher) evaluate(rule *types.MatchRule, userMessage string, tu
 		if match == nil {
 			return nil
 		}
-		// Extract named capture groups.
+		// Extract named capture groups. Allocate only when the regex
+		// actually declares at least one name — anonymous groups are
+		// common and do not need a map.
 		for i, name := range re.SubexpNames() {
 			if i > 0 && name != "" && i < len(match) {
+				if captures == nil {
+					captures = make(map[string]string, 4)
+				}
 				captures[name] = match[i]
 			}
 		}
@@ -100,6 +115,9 @@ func (m *ScenarioMatcher) evaluate(rule *types.MatchRule, userMessage string, tu
 		}
 	}
 
+	if captures == nil {
+		return matchedSentinel
+	}
 	return captures
 }
 

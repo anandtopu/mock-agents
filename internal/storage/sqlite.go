@@ -5,9 +5,21 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"sync"
 
 	_ "modernc.org/sqlite"
+)
+
+// Connection-pool sizing for the interaction log store. WAL mode lets
+// readers run concurrently with each other and with a single writer,
+// so raising MaxOpenConns unblocks parallel GET /api/v1/logs calls
+// while the bounded log worker pool is appending rows in the
+// background. Eight connections is a conservative ceiling — modest
+// enough that file-handle and goroutine pressure stays bounded on
+// constrained hosts, generous enough that a typical dashboard/SDK
+// mix does not queue behind a single connection.
+const (
+	maxOpenConns = 8
+	maxIdleConns = 8
 )
 
 const schema = `
@@ -37,21 +49,38 @@ CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON interaction_logs(timestamp);
 // SQLiteStore manages SQLite-backed interaction log storage.
 type SQLiteStore struct {
 	db *sql.DB
-	mu sync.Mutex // protects batch buffer
-	buf []InteractionLog
 }
 
 // NewSQLiteStore opens or creates a SQLite database at the given path.
-// Uses WAL mode for concurrent read/write safety.
+//
+// The DSN configures the standard WAL-mode tuning for log-class
+// workloads:
+//
+//   - journal_mode=WAL   — concurrent readers + single writer without
+//     blocking each other.
+//   - synchronous=NORMAL — standard WAL pairing; durable against
+//     process crashes, can lose the last ~millisecond of writes on a
+//     hard power-off. Acceptable for interaction logs, which are a
+//     debugging aid rather than a system of record.
+//   - busy_timeout=5000  — lock-contention backoff in ms.
+//
+// Connection-pool sizing (MaxOpenConns=8) was raised from the v0.1
+// default of 1 so GET /api/v1/logs, GET /api/v1/costs, and the async
+// log worker can all make progress in parallel. Note that the
+// tenancy store still deliberately uses MaxOpenConns=1 for a
+// different reason (the `Resolve` path holds a Rows iterator open
+// while issuing an UPDATE on the same connection; see
+// internal/tenancy/store.go for the inline comment explaining that
+// constraint). Do not copy that pattern here.
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	dsn := dbPath + "?_pragma=journal_mode(wal)&_pragma=busy_timeout(5000)"
+	dsn := dbPath + "?_pragma=journal_mode(wal)&_pragma=synchronous(normal)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening database %s: %w", dbPath, err)
 	}
 
-	// Limit connections for SQLite.
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
 
 	// Apply schema.
 	if _, err := db.Exec(schema); err != nil {
@@ -64,7 +93,7 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 
 // Log inserts a single interaction log record.
 func (s *SQLiteStore) Log(ctx context.Context, entry *InteractionLog) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO interaction_logs
 			(timestamp, agent_name, session_id, protocol, request_method, request_path,
 			 request_body, response_status, response_body, latency_ms,
@@ -76,7 +105,17 @@ func (s *SQLiteStore) Log(ctx context.Context, entry *InteractionLog) error {
 		entry.LatencyMs, entry.ToolCallsCount, boolToInt(entry.Streaming),
 		entry.Error, entry.ScenarioName,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Populate the ID on the passed entry so async consumers
+	// (LogBroadcaster subscribers, for example) can surface a clickable
+	// /logs/{id} link to their clients. LastInsertId failures are not
+	// fatal — the row is already persisted.
+	if id, lerr := res.LastInsertId(); lerr == nil {
+		entry.ID = id
+	}
+	return nil
 }
 
 // Query retrieves interaction logs matching the given filter.

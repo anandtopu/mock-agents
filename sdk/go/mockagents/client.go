@@ -196,6 +196,28 @@ func (c *Client) GetAgent(ctx context.Context, name string) (map[string]any, err
 	return out, nil
 }
 
+// RotateMyAPIKey calls POST /api/v1/keys/me/rotate. The caller
+// rotates their own authenticated key in place; the server reads
+// the principal from the request context so there is no id to
+// pass. Returns the raw JSON payload as a map so callers can pick
+// out `key` / `plaintext` without a typed dependency on the
+// tenancy package.
+//
+// Note: the returned plaintext is the NEW secret. The old one is
+// already invalid — subsequent calls must use the new value in
+// their Authorization header.
+func (c *Client) RotateMyAPIKey(ctx context.Context) (map[string]any, error) {
+	_, body, err := c.do(ctx, http.MethodPost, "/api/v1/keys/me/rotate", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ReloadAgent triggers a hot reload of the named agent.
 func (c *Client) ReloadAgent(ctx context.Context, name string) (map[string]any, error) {
 	_, body, err := c.do(ctx, http.MethodPost, "/api/v1/agents/"+url.PathEscape(name)+"/reload", nil, nil)

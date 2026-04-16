@@ -14,12 +14,23 @@ MockAgents lets you define mock AI agents in YAML and test your integrations aga
 
 - **Drop-in replacement** for OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`) APIs
 - **Declarative YAML** agent definitions with scenarios, tools, and match rules
+- **Multi-agent pipelines** (`kind: Pipeline`) with sequential, parallel, and graph topologies
 - **Tool call simulation** with match-based responses and error injection
 - **SSE streaming** with configurable chunk size and delay
 - **Template expressions** — `{{ uuid }}`, `{{ random_int 1 100 }}`, `{{ fake_name }}`, and more
-- **Python SDK** with fluent assertions and pytest integration
-- **Single binary** — no runtime dependencies
-- **Docker image** for CI/CD pipelines
+- **Three language SDKs** — Python, TypeScript, and Go — all with streaming helpers and parity surface
+- **Go SDK in-process mode** — spin up an engine inside your test binary without a subprocess
+- **Mock MCP server** — JSON-RPC 2.0 with HTTP + stdio transports, plus a v0.3 bidirectional
+  SSE channel for `sampling/createMessage` and `roots/list`
+- **Record and playback** — capture real upstream traffic once, replay offline forever
+- **Contract testing** — extract agent contracts as JSON; diff breaking changes in CI
+- **Chaos engineering** — inject latency, errors, and rate limits per-agent
+- **Multi-tenant control plane** — tenants, API keys with RBAC, rotation in place
+- **Web console** (Next.js 15) — agent catalog, pipeline DAG viewer, live log feed over SSE,
+  schema-validating YAML editor, cost dashboard, audit log, and admin surfaces
+- **OpenTelemetry tracing** — opt-in OTLP exporter, zero runtime overhead by default
+- **Single binary** — no runtime dependencies (pure-Go SQLite, no cgo)
+- **Docker image + Helm chart** for CI/CD and Kubernetes deployments
 
 ## Quick Start
 
@@ -167,7 +178,8 @@ curl -H "Authorization: Bearer $ADMIN_KEY" \
 ```
 
 Supported `kind` values: `tenant.created`, `tenant.deleted`,
-`api_key.created`, `api_key.deleted`, `agent.reloaded`. Additional
+`api_key.created`, `api_key.deleted`, `api_key.role_changed`,
+`api_key.rotated`, `agent.reloaded`, `auth.denied`. Additional
 filters: `actor` (exact-match actor name), `since` (RFC3339 lower
 bound), `limit` (default 100, max 1000).
 
@@ -214,7 +226,14 @@ lose it. Three roles, ordered by privilege: `viewer` < `editor` <
 | `GET  /api/v1/tenants`                    | admin    |
 | `POST /api/v1/tenants`, `DELETE ...`      | admin    |
 | `POST /api/v1/tenants/{id}/keys`          | admin    |
+| `POST /api/v1/tenants/{id}/keys/rotate`   | admin    |
+| `PATCH /api/v1/keys/{id}`                 | admin    |
+| `POST /api/v1/keys/{id}/rotate`           | admin    |
+| `POST /api/v1/keys/me/rotate`             | viewer   |
+| `POST /api/v1/keys/me/burn`               | viewer   |
+| `GET  /api/v1/logs/stream/metrics`        | admin    |
 | `DELETE /api/v1/keys/{id}`                | admin    |
+| `POST /api/v1/config/validate`            | editor   |
 
 **The LLM endpoints (`/v1/chat/completions`, `/v1/messages`,
 `/v1/models`, `/v1/engines/*`) deliberately remain unauthenticated** —
@@ -229,17 +248,29 @@ curl -H "Authorization: Bearer $ADMIN_KEY" \
   http://localhost:8080/api/v1/tenants/$TENANT_ID/keys
 ```
 
-### What's deliberately not in v0.1
+### Rotation and role changes
 
-- **Tenant-scoped agent data isolation.** Agents are still loaded from
-  disk and shared across tenants; the current slice protects only the
-  control plane. Per-tenant agent stores rewire the engine and deserve
-  their own slice.
+`POST /api/v1/keys/{id}/rotate` regenerates an existing key's secret
+in place. The key id, name, role, and tenant stay stable so every
+consumer that references the key by id keeps working — only the
+plaintext changes. The old hash is replaced atomically inside a
+transaction, the auth cache is flushed, and an `api_key.rotated`
+audit event is emitted with both the old and new prefixes so
+operators can correlate a rotation with a specific compromised
+credential. `PATCH /api/v1/keys/{id}` changes the role with the same
+audit semantics.
+
+### What's deliberately deferred
+
+- **Tenant-scoped agent data isolation per name.** Agents can carry
+  `metadata.tenant_id` and the engine resolves with tenant visibility,
+  but agents still share a global name namespace — two tenants can't
+  both own an `echo` agent. Needs the Postgres slice.
 - **Postgres backend.** The tenancy store is pure-Go SQLite
   (`.mockagents-tenancy.db`); the `Store` interface makes a Postgres
   implementation straightforward once it's needed.
 - **Billing, quotas, usage metering.** SaaS primitives — separate slice.
-- **SSO / OAuth / key rotation workflows.** API keys only for now.
+- **SSO / OAuth.** API keys only for now.
 
 ## Kubernetes (Helm chart)
 
@@ -259,21 +290,34 @@ helm test demo
 See `deploy/helm/mockagents/README.md` for the full list of values and
 the two ways to provide agent definitions (inline vs. existing ConfigMap).
 
-## Web Console (GUI v0.1)
+## Web Console (GUI v0.3)
 
-A minimal Next.js 15 web console lives under `gui/`. It's a read-only
-dashboard that talks to the MockAgents management API — agent catalog,
-agent detail with raw definition, recent interaction logs, and a live
-health pill. Run it alongside the mock server:
+A Next.js 15 web console lives under `gui/` with 15 routes covering
+read, authoring, and admin surfaces:
+
+- **Read**: agent catalog, agent detail, pipelines list, pipeline
+  DAG viewer (static SVG), interaction logs with per-row detail,
+  cost estimates, audit log.
+- **Live**: `/logs?live=1` opens a real server-sent-events
+  subscription to `GET /api/v1/logs/stream` — new rows land sub-
+  second after the backend SQLite write.
+- **Authoring**: `/editor` is a textarea + Validate button that
+  posts to `POST /api/v1/config/validate`. Same validator the CLI
+  uses, no client-side schema duplication.
+- **Admin** (multi-tenant mode): `/login` + HttpOnly cookie auth,
+  `/admin/tenants` tenant CRUD, `/admin/tenants/[id]` key
+  management with inline role changes and Rotate button.
 
 ```bash
 mockagents start --agents-dir ./agents        # terminal 1
-cd gui && npm install && npm run dev           # terminal 2 → :3001
+cd gui && npm install && npm run dev          # terminal 2 → :3001
 ```
 
-Set `MOCKAGENTS_API_URL` to point the GUI at a non-local server. The
-workflow editor, config editor, and WebSocket live-update feed in the
-product plan are deliberately out of v0.1 scope.
+Set `MOCKAGENTS_API_URL` to point the GUI at a non-local server.
+See `gui/README.md` for the full feature list and design notes.
+The drag-to-rewire workflow editor (for `kind: Pipeline` documents)
+is the one GUI v0.3 item still deferred — the read-only DAG viewer
+ships, editing does not.
 
 ## Multi-Agent Pipelines
 
@@ -342,10 +386,16 @@ mockagents mcp --transport http --port 8081 --agents-dir examples
 mockagents mcp --transport stdio --agents-dir examples --server weather-mcp
 ```
 
-Supported methods: `initialize`, `tools/list`, `tools/call`,
+Supported methods (v0.3): `initialize`, `tools/list`, `tools/call`,
 `resources/list`, `resources/read`, `prompts/list`, `prompts/get`,
-`ping`, and `notifications/initialized`. Streaming notifications are
-not supported in v1. See `examples/weather-mcp.yaml` for a working
+`completion/complete`, `logging/setLevel`, `ping`, and
+`notifications/initialized`. Server-initiated calls
+(`sampling/createMessage`, `roots/list`) flow through a
+bidirectional SSE transport: clients subscribe to
+`GET /mcp/events`, read incoming JSON-RPC requests, and POST their
+responses to `POST /mcp/response`. Test harnesses can drive the
+outbound side directly via `POST /mcp/sample` or
+`POST /mcp/roots`. See `examples/weather-mcp.yaml` for a working
 definition.
 
 ## Framework Adapters (Python)

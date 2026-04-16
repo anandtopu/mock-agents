@@ -1,0 +1,242 @@
+// Command benchreport runs the Go benchmarks for a given package set,
+// parses the standard `go test -bench` output, and emits both a JSON
+// artifact and a human-readable Markdown snapshot under
+// docs/benchmarks/. Drops straight into CI: run it after a build, upload
+// the JSON as a workflow artifact, and point reviewers at the Markdown.
+//
+// Usage:
+//
+//	go run ./tools/benchreport -pkg ./internal/engine/... -out docs/benchmarks
+//
+// The tool intentionally shells out to `go test` rather than importing
+// the testing package so it can capture stdout deterministically and
+// stay out of whatever hot-path init the benchmarked packages run.
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Result is one parsed benchmark line in a normalized shape. ns/op is
+// always filled; memory columns are optional because `-benchmem` is on
+// by default but not guaranteed to succeed on every line (e.g. a
+// benchmark that panics mid-run).
+type Result struct {
+	Name         string  `json:"name"`
+	Iterations   int64   `json:"iterations"`
+	NsPerOp      float64 `json:"ns_per_op"`
+	BytesPerOp   int64   `json:"bytes_per_op,omitempty"`
+	AllocsPerOp  int64   `json:"allocs_per_op,omitempty"`
+	OpsPerSecond float64 `json:"ops_per_second"`
+}
+
+// Report is the top-level JSON envelope. Consumers can pin the schema
+// version if the shape evolves.
+type Report struct {
+	SchemaVersion string    `json:"schema_version"`
+	Timestamp     time.Time `json:"timestamp"`
+	GoVersion     string    `json:"go_version"`
+	GOOS          string    `json:"goos"`
+	GOARCH        string    `json:"goarch"`
+	Package       string    `json:"package"`
+	Results       []Result  `json:"results"`
+}
+
+func main() {
+	pkg := flag.String("pkg", "./internal/engine/...", "package pattern to benchmark")
+	outDir := flag.String("out", "docs/benchmarks", "directory to write latest.json + latest.md into")
+	benchTime := flag.String("benchtime", "1s", "value for go test -benchtime")
+	count := flag.Int("count", 1, "value for go test -count")
+	flag.Parse()
+
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
+		die("mkdir %s: %v", *outDir, err)
+	}
+
+	args := []string{
+		"test",
+		"-run", "^$",
+		"-bench", ".",
+		"-benchmem",
+		"-benchtime", *benchTime,
+		"-count", strconv.Itoa(*count),
+		*pkg,
+	}
+	fmt.Fprintf(os.Stderr, "benchreport: running go %s\n", strings.Join(args, " "))
+	cmd := exec.Command("go", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprint(os.Stderr, stderr.String())
+		die("go test failed: %v", err)
+	}
+
+	results := parseBenchOutput(stdout.String())
+	if len(results) == 0 {
+		die("no benchmark results parsed — check %q actually contains benchmarks", *pkg)
+	}
+
+	report := Report{
+		SchemaVersion: "1",
+		Timestamp:     time.Now().UTC(),
+		GoVersion:     runtime.Version(),
+		GOOS:          runtime.GOOS,
+		GOARCH:        runtime.GOARCH,
+		Package:       *pkg,
+		Results:       results,
+	}
+
+	jsonPath := filepath.Join(*outDir, "latest.json")
+	if err := writeJSON(jsonPath, report); err != nil {
+		die("writing %s: %v", jsonPath, err)
+	}
+	mdPath := filepath.Join(*outDir, "latest.md")
+	if err := writeMarkdown(mdPath, report); err != nil {
+		die("writing %s: %v", mdPath, err)
+	}
+
+	fmt.Fprintf(os.Stderr, "benchreport: wrote %d results to %s and %s\n",
+		len(results), jsonPath, mdPath)
+}
+
+// parseBenchOutput consumes `go test -bench` stdout and returns one
+// Result per benchmark line. Lines we don't recognize (PASS, ok, build
+// noise) are silently skipped.
+//
+// Expected format:
+//
+//	BenchmarkName-8   	1234567	      123.4 ns/op	      45 B/op	       2 allocs/op
+func parseBenchOutput(out string) []Result {
+	var results []Result
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "Benchmark") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		name := stripProcSuffix(fields[0])
+		iters, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		ns, err := strconv.ParseFloat(fields[2], 64)
+		if err != nil || fields[3] != "ns/op" {
+			continue
+		}
+		r := Result{
+			Name:       name,
+			Iterations: iters,
+			NsPerOp:    ns,
+		}
+		if ns > 0 {
+			r.OpsPerSecond = 1e9 / ns
+		}
+		// Optional trailing columns.
+		for i := 4; i+1 < len(fields); i += 2 {
+			val := fields[i]
+			unit := fields[i+1]
+			switch unit {
+			case "B/op":
+				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+					r.BytesPerOp = n
+				}
+			case "allocs/op":
+				if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+					r.AllocsPerOp = n
+				}
+			}
+		}
+		results = append(results, r)
+	}
+	return results
+}
+
+// stripProcSuffix turns "BenchmarkX-8" into "BenchmarkX" so the results
+// stay comparable across machines with different GOMAXPROCS.
+func stripProcSuffix(name string) string {
+	if i := strings.LastIndex(name, "-"); i > 0 {
+		if _, err := strconv.Atoi(name[i+1:]); err == nil {
+			return name[:i]
+		}
+	}
+	return name
+}
+
+func writeJSON(path string, r Report) error {
+	b, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	return os.WriteFile(path, b, 0o644)
+}
+
+func writeMarkdown(path string, r Report) error {
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, "# MockAgents Benchmark Report\n\n")
+	fmt.Fprintf(&buf, "_Generated %s_\n\n", r.Timestamp.Format(time.RFC3339))
+	fmt.Fprintf(&buf, "- **Go:** %s\n- **Platform:** %s/%s\n- **Package:** `%s`\n\n",
+		r.GoVersion, r.GOOS, r.GOARCH, r.Package)
+	fmt.Fprintln(&buf, "| Benchmark | Iterations | ns/op | ops/sec | B/op | allocs/op |")
+	fmt.Fprintln(&buf, "| --- | ---: | ---: | ---: | ---: | ---: |")
+	for _, row := range r.Results {
+		fmt.Fprintf(&buf, "| `%s` | %d | %.1f | %s | %d | %d |\n",
+			row.Name,
+			row.Iterations,
+			row.NsPerOp,
+			humanInt(int64(row.OpsPerSecond)),
+			row.BytesPerOp,
+			row.AllocsPerOp,
+		)
+	}
+	fmt.Fprintf(&buf, "\n> This file is regenerated by `make bench-report`. Do not hand-edit.\n")
+	return os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+// humanInt formats an integer with comma separators so a reader can
+// tell 1,200,000 from 120,000 at a glance.
+func humanInt(n int64) string {
+	if n < 0 {
+		return "-" + humanInt(-n)
+	}
+	s := strconv.FormatInt(n, 10)
+	if len(s) <= 3 {
+		return s
+	}
+	var out strings.Builder
+	pre := len(s) % 3
+	if pre > 0 {
+		out.WriteString(s[:pre])
+		if len(s) > pre {
+			out.WriteByte(',')
+		}
+	}
+	for i := pre; i < len(s); i += 3 {
+		out.WriteString(s[i : i+3])
+		if i+3 < len(s) {
+			out.WriteByte(',')
+		}
+	}
+	return out.String()
+}
+
+func die(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "benchreport: "+format+"\n", args...)
+	os.Exit(1)
+}

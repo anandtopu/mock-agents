@@ -30,13 +30,21 @@ type Session struct {
 	TTL        time.Duration     `json:"-"`
 }
 
+// initialMessageCap is the pre-allocated capacity for a new session's
+// Messages slice. Chosen so a typical 3–8 turn conversation never
+// reallocates; longer conversations grow exponentially as normal.
+// Profiling (2026-04-14) showed Session.AppendUserMessage at ~10%
+// cumulative CPU driven entirely by growslice out of the zero-cap
+// default.
+const initialMessageCap = 16
+
 // NewSession creates a new session with the given ID and agent name.
 func NewSession(id, agentName string, ttl time.Duration) *Session {
 	now := time.Now()
 	return &Session{
 		ID:         id,
 		AgentName:  agentName,
-		Messages:   make([]Message, 0),
+		Messages:   make([]Message, 0, initialMessageCap),
 		Variables:  make(map[string]any),
 		CreatedAt:  now,
 		LastAccess: now,

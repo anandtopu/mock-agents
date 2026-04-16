@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // Replay is an HTTP handler that serves previously recorded interactions
@@ -15,6 +16,11 @@ type Replay struct {
 	// Fallback is invoked when no matching interaction is found. If nil,
 	// replay returns a 404 with a descriptive error body.
 	Fallback http.Handler
+	// PreserveStreamDelays, when true, causes streaming replays to
+	// honor the original DelayMs timestamps between chunks. Defaults
+	// off so CI suites get deterministic fast replays; set to true
+	// for demos where realistic pacing matters.
+	PreserveStreamDelays bool
 }
 
 // NewReplay builds a Replay handler.
@@ -46,6 +52,13 @@ func (rp *Replay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Streaming hit: replay captured SSE chunks in order, optionally
+	// honoring the original inter-chunk delays.
+	if it.Streaming {
+		rp.serveStreaming(w, it)
+		return
+	}
+
 	for k, v := range it.ResponseHeaders {
 		w.Header().Set(k, v)
 	}
@@ -56,4 +69,42 @@ func (rp *Replay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(it.ResponseBody)
+}
+
+// serveStreaming writes a captured SSE interaction back to the client,
+// flushing after every chunk so downstream consumers see the same
+// incremental arrivals they would from a real LLM server.
+func (rp *Replay) serveStreaming(w http.ResponseWriter, it *Interaction) {
+	for k, v := range it.ResponseHeaders {
+		w.Header().Set(k, v)
+	}
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
+	w.Header().Set("X-Mockagents-Replay", "hit-streaming")
+	status := it.ResponseStatus
+	if status == 0 {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
+	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	start := time.Now()
+	for _, ev := range it.StreamEvents {
+		if rp.PreserveStreamDelays && ev.DelayMs > 0 {
+			target := start.Add(time.Duration(ev.DelayMs) * time.Millisecond)
+			if d := time.Until(target); d > 0 {
+				time.Sleep(d)
+			}
+		}
+		if _, err := w.Write([]byte(ev.Data)); err != nil {
+			return
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 }

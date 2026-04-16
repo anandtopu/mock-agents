@@ -28,8 +28,8 @@ func newTestStore(t *testing.T) *SQLiteStore {
 func TestEventKindValid(t *testing.T) {
 	valid := []EventKind{
 		EventTenantCreated, EventTenantDeleted,
-		EventAPIKeyCreated, EventAPIKeyDeleted,
-		EventAgentReloaded,
+		EventAPIKeyCreated, EventAPIKeyDeleted, EventAPIKeyRoleChanged,
+		EventAgentReloaded, EventAuthDenied,
 	}
 	for _, k := range valid {
 		if !k.Valid() {
@@ -38,6 +38,74 @@ func TestEventKindValid(t *testing.T) {
 	}
 	if EventKind("bogus").Valid() {
 		t.Error("bogus kind should not be valid")
+	}
+}
+
+// --- Concurrent append (regression guard for multi-conn pool) ---
+
+// TestConcurrentAppend fires append calls from many goroutines at
+// once to verify the multi-conn pool + WAL + no-mutex design still
+// persists every event exactly once with a unique ID. Before #7 this
+// would have been serialized behind a single connection and a
+// sync.Mutex; after, it runs in parallel at the Go level and the
+// database layer's own WAL write lock provides ordering.
+func TestConcurrentAppend(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	const (
+		goroutines  = 8
+		perGoroutine = 25
+		total        = goroutines * perGoroutine
+	)
+
+	errs := make(chan error, total)
+	done := make(chan struct{})
+	running := 0
+	for g := 0; g < goroutines; g++ {
+		running++
+		go func(gid int) {
+			defer func() { done <- struct{}{} }()
+			for i := 0; i < perGoroutine; i++ {
+				evt := &Event{
+					Kind:   EventAuthDenied,
+					Target: "GET /api/v1/tenants",
+					Actor:  Actor{Name: "anonymous"},
+				}
+				if err := s.Append(ctx, evt); err != nil {
+					errs <- err
+					return
+				}
+				if evt.ID == 0 {
+					errs <- nil // sentinel; we check ID below
+				}
+			}
+		}(g)
+	}
+	for i := 0; i < running; i++ {
+		<-done
+	}
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Append: %v", err)
+		}
+	}
+
+	events, err := s.List(ctx, Query{Limit: 1000})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(events) != total {
+		t.Errorf("persisted %d events, want %d", len(events), total)
+	}
+	// IDs must be unique.
+	seen := make(map[int64]bool, total)
+	for _, e := range events {
+		if seen[e.ID] {
+			t.Errorf("duplicate event ID %d", e.ID)
+		}
+		seen[e.ID] = true
 	}
 }
 

@@ -16,6 +16,7 @@ export type {
   AgentSummary,
   ChatMessage,
   ChatResponse,
+  StreamChunk,
   ToolCall,
   TokenUsage,
 } from "./types.js";
@@ -25,5 +26,15 @@ export {
   MockAgentsError,
   ServerError,
 } from "./types.js";
+
+export { McpClient, isRequest, paramsOf, parseMcpFrame } from "./mcp.js";
+export type {
+  McpClientOptions,
+  McpEvent,
+  McpEventStream,
+  JsonRpcEnvelope,
+  JsonRpcError,
+  McpRequestHandler,
+} from "./mcp.js";
 
 export * as adapters from "./adapters/index.js";

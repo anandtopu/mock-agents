@@ -20,11 +20,26 @@ import (
 type EventKind string
 
 const (
-	EventTenantCreated EventKind = "tenant.created"
-	EventTenantDeleted EventKind = "tenant.deleted"
-	EventAPIKeyCreated EventKind = "api_key.created"
-	EventAPIKeyDeleted EventKind = "api_key.deleted"
+	EventTenantCreated      EventKind = "tenant.created"
+	EventTenantDeleted      EventKind = "tenant.deleted"
+	EventAPIKeyCreated      EventKind = "api_key.created"
+	EventAPIKeyDeleted      EventKind = "api_key.deleted"
+	EventAPIKeyRoleChanged  EventKind = "api_key.role_changed"
+	// EventAPIKeyRotated fires when an operator regenerates an
+	// existing key's secret in place. The key id, name, role, and
+	// tenant stay the same; only the plaintext (and therefore the
+	// hash + prefix) change. Target is the key id; Details carries
+	// the old prefix so operators can match the rotation to a
+	// specific compromised credential.
+	EventAPIKeyRotated EventKind = "api_key.rotated"
 	EventAgentReloaded EventKind = "agent.reloaded"
+	// EventAuthDenied fires on every 401 (missing/invalid credentials)
+	// and 403 (valid credential, insufficient role) at the control
+	// plane. The Target carries the HTTP method + path of the denied
+	// request; Details carries status_code and reason. Anonymous
+	// denials still produce an entry so failed-auth spikes are
+	// visible to operators even when no principal is present.
+	EventAuthDenied EventKind = "auth.denied"
 )
 
 // Valid reports whether k is one of the known event kinds. Used by
@@ -33,8 +48,8 @@ const (
 func (k EventKind) Valid() bool {
 	switch k {
 	case EventTenantCreated, EventTenantDeleted,
-		EventAPIKeyCreated, EventAPIKeyDeleted,
-		EventAgentReloaded:
+		EventAPIKeyCreated, EventAPIKeyDeleted, EventAPIKeyRoleChanged,
+		EventAPIKeyRotated, EventAgentReloaded, EventAuthDenied:
 		return true
 	}
 	return false

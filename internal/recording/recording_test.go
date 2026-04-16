@@ -205,3 +205,168 @@ func TestRecordThenReplayEndToEnd(t *testing.T) {
 		t.Error("replay hit header missing")
 	}
 }
+
+// fakeSSEUpstream writes a canned 4-event SSE stream with tiny delays
+// between events. Returns the exact bytes it emitted so tests can do
+// byte-level comparisons against the replayed output.
+func fakeSSEUpstream(t *testing.T) (*httptest.Server, []byte) {
+	t.Helper()
+	chunks := [][]byte{
+		[]byte("event: message\ndata: {\"id\":\"1\",\"delta\":\"Hello\"}\n\n"),
+		[]byte("event: message\ndata: {\"id\":\"1\",\"delta\":\" \"}\n\n"),
+		[]byte("event: message\ndata: {\"id\":\"1\",\"delta\":\"world\"}\n\n"),
+		[]byte("event: done\ndata: [DONE]\n\n"),
+	}
+	var combined []byte
+	for _, c := range chunks {
+		combined = append(combined, c...)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for _, c := range chunks {
+			_, _ = w.Write(c)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	return srv, combined
+}
+
+func TestProxyCapturesStreamingResponse(t *testing.T) {
+	upstream, expected := fakeSSEUpstream(t)
+	defer upstream.Close()
+
+	path := filepath.Join(t.TempDir(), "stream.jsonl")
+	cass := New(path)
+	proxy, err := NewProxy(upstream.URL, cass)
+	if err != nil {
+		t.Fatalf("NewProxy: %v", err)
+	}
+	front := httptest.NewServer(proxy)
+	defer front.Close()
+
+	reqBody := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"go"}]}`
+	resp, err := http.Post(front.URL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("Content-Type = %q, want text/event-stream", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Equal(body, expected) {
+		t.Errorf("client bytes did not match upstream\nwant:\n%s\ngot:\n%s", expected, body)
+	}
+
+	if cass.Len() != 1 {
+		t.Fatalf("cassette size = %d, want 1", cass.Len())
+	}
+	it := cass.All()[0]
+	if !it.Streaming {
+		t.Error("interaction not marked Streaming")
+	}
+	if len(it.StreamEvents) == 0 {
+		t.Fatal("no stream events captured")
+	}
+	// Concatenating the captured events must yield exactly the upstream bytes.
+	var rebuilt []byte
+	for _, ev := range it.StreamEvents {
+		rebuilt = append(rebuilt, []byte(ev.Data)...)
+	}
+	if !bytes.Equal(rebuilt, expected) {
+		t.Errorf("cassette bytes did not match upstream\nwant:\n%s\ngot:\n%s", expected, rebuilt)
+	}
+	if len(it.ResponseBody) != 0 {
+		t.Errorf("ResponseBody should be empty for streaming capture, got %d bytes", len(it.ResponseBody))
+	}
+}
+
+func TestReplayServesCapturedStream(t *testing.T) {
+	upstream, expected := fakeSSEUpstream(t)
+	defer upstream.Close()
+
+	// Record once.
+	cass := New(filepath.Join(t.TempDir(), "rep.jsonl"))
+	proxy, _ := NewProxy(upstream.URL, cass)
+	recordSrv := httptest.NewServer(proxy)
+	defer recordSrv.Close()
+
+	reqBody := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"go"}]}`
+	resp, err := http.Post(recordSrv.URL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("record POST: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	// Replay (delays off to keep the test deterministic).
+	rp := NewReplay(cass)
+	replaySrv := httptest.NewServer(rp)
+	defer replaySrv.Close()
+
+	resp2, err := http.Post(replaySrv.URL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("replay POST: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.Header.Get("X-Mockagents-Replay") != "hit-streaming" {
+		t.Errorf("replay header = %q, want hit-streaming", resp2.Header.Get("X-Mockagents-Replay"))
+	}
+	if ct := resp2.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("replay Content-Type = %q, want text/event-stream", ct)
+	}
+	got, _ := io.ReadAll(resp2.Body)
+	if !bytes.Equal(got, expected) {
+		t.Errorf("replay bytes did not match original\nwant:\n%s\ngot:\n%s", expected, got)
+	}
+}
+
+// TestStreamingRoundTripsThroughDisk verifies that a captured stream
+// reloaded from disk still replays exactly the same bytes. Catches
+// any JSON-escape regressions in the StreamEvent.Data field.
+func TestStreamingRoundTripsThroughDisk(t *testing.T) {
+	upstream, expected := fakeSSEUpstream(t)
+	defer upstream.Close()
+
+	path := filepath.Join(t.TempDir(), "disk.jsonl")
+	cass := New(path)
+	proxy, _ := NewProxy(upstream.URL, cass)
+	recordSrv := httptest.NewServer(proxy)
+	defer recordSrv.Close()
+
+	reqBody := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"go"}]}`
+	resp, err := http.Post(recordSrv.URL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("record POST: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if reloaded.Len() != 1 {
+		t.Fatalf("reloaded cassette size = %d, want 1", reloaded.Len())
+	}
+
+	rp := NewReplay(reloaded)
+	replaySrv := httptest.NewServer(rp)
+	defer replaySrv.Close()
+
+	resp2, err := http.Post(replaySrv.URL+"/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("replay POST: %v", err)
+	}
+	defer resp2.Body.Close()
+	got, _ := io.ReadAll(resp2.Body)
+	if !bytes.Equal(got, expected) {
+		t.Errorf("round-trip bytes mismatch\nwant:\n%s\ngot:\n%s", expected, got)
+	}
+}

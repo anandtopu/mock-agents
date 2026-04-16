@@ -147,3 +147,86 @@ env: {}
 
 # -- Extra command-line flags appended to `mockagents start`.
 extraArgs: []
+
+# --- v0.2 additions ---
+
+# -- HorizontalPodAutoscaler for the mockagents Deployment. Off by
+# -- default (Deployment.replicas wins); flip enabled=true to scale on
+# -- CPU and/or memory. The chart targets the autoscaling/v2 API and
+# -- never falls back to v2beta — confirmed clean against Kubernetes
+# -- 1.24+ via the kubeVersion constraint in Chart.yaml.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  # Set to a non-empty string to scale on CPU utilization.
+  targetCPUUtilizationPercentage: 70
+  # Set to a non-empty string to also scale on memory utilization.
+  targetMemoryUtilizationPercentage: ""
+  # Optional behavior block for HPA stabilization windows. Helm
+  # passes this through verbatim — leave empty for k8s defaults.
+  behavior: {}
+
+# -- PodDisruptionBudget so a voluntary disruption (node drain,
+# -- cluster upgrade) cannot evict every replica at once. Disabled by
+# -- default because the v0.1 default replicaCount is 1, where a PDB
+# -- would block drains entirely; flip enabled=true once you raise
+# -- replicaCount or autoscaling.minReplicas.
+podDisruptionBudget:
+  enabled: false
+  # Exactly one of minAvailable / maxUnavailable should be set.
+  minAvailable: 1
+  maxUnavailable: ""
+
+# -- NetworkPolicy locking down ingress + egress traffic. Off by
+# -- default because cluster admins typically own the policy
+# -- baseline. When enabled the rules below assume:
+# --   * Ingress from Pods carrying the matching client labels and
+# --     from any Pod in a namespace carrying the namespace labels.
+# --   * Optional ingress from anywhere on the service port (set
+# --     allowExternalIngress=true) so an Ingress controller in a
+# --     different namespace can reach the pods without per-controller
+# --     wiring.
+# --   * DNS egress to kube-dns plus operator-supplied egress rules.
+networkPolicy:
+  enabled: false
+  # Allow traffic from any pod in the same namespace by default. Set
+  # to false to require explicit ingressFrom rules.
+  allowSameNamespace: true
+  # Allow inbound traffic on the service port from anywhere (e.g.
+  # for a cluster-wide Ingress controller).
+  allowExternalIngress: false
+  ingressFrom: []
+  # Example:
+  # ingressFrom:
+  #   - podSelector:
+  #       matchLabels: {app.kubernetes.io/name: my-app}
+  #   - namespaceSelector:
+  #       matchLabels: {team: platform}
+  egressRules: []
+  # Always allow egress to kube-dns even when egressRules is empty.
+  allowDNS: true
+
+# -- Prometheus Operator ServiceMonitor. Requires the Prometheus
+# -- Operator CRDs to be installed; the chart silently skips this
+# -- template otherwise. The exposed metrics shape is whatever the
+# -- mockagents binary prints at /metrics — currently the standard
+# -- Go runtime + log worker counters.
+serviceMonitor:
+  enabled: false
+  # Override the namespace the ServiceMonitor is created in. Default
+  # is the release namespace.
+  namespace: ""
+  # Scrape interval; the Prometheus default of 30s is plenty for a
+  # mock server.
+  interval: 30s
+  scrapeTimeout: 10s
+  # Path the metrics endpoint serves on. Matches the Go binary
+  # default; override only if extraArgs changes the route.
+  path: /metrics
+  # Extra labels added to the ServiceMonitor (e.g. release: kube-prom)
+  # so the right Prometheus instance picks it up.
+  labels: {}
+  # Extra labels added by metricRelabelings.
+  metricRelabelings: []
+  relabelings: []

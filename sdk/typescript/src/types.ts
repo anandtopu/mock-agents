@@ -33,6 +33,31 @@ export interface ChatMessage {
   name?: string;
 }
 
+/**
+ * Protocol-agnostic chunk yielded by ``MockAgentClient.iterStream``.
+ * Both OpenAI and Anthropic SSE streams normalize into this shape so
+ * user code can iterate the same way regardless of provider.
+ *
+ * - ``text`` — incremental text delta. Empty for non-text events.
+ * - ``toolCallDelta`` — ``[index, name, argumentsFragment]`` triple
+ *   when the chunk carries a partial tool call. ``argumentsFragment``
+ *   is the raw JSON fragment as the provider streams it; callers
+ *   that need parsed arguments should accumulate fragments themselves.
+ * - ``finishReason`` — set on the terminal chunk only (e.g. "stop",
+ *   "tool_calls", "end_turn"). Empty otherwise.
+ * - ``finished`` — true on the terminal chunk so consumers can
+ *   ``break`` out of a loop without inspecting strings.
+ * - ``raw`` — the original event dict from the wire, for callers
+ *   that need provider-specific fields the normalization dropped.
+ */
+export interface StreamChunk {
+  text: string;
+  toolCallDelta?: [number, string, string];
+  finishReason: string;
+  finished: boolean;
+  raw: unknown;
+}
+
 export interface AgentSummary {
   name: string;
   description?: string;

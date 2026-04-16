@@ -37,6 +37,14 @@ type TemplateContext struct {
 	Match      map[string]string // Regex capture groups from scenario matching
 }
 
+// renderBufPool recycles bytes.Buffer instances used during template
+// execution. Templates are the hottest allocation site after scenario
+// matching, and Execute writes a short string we immediately copy into
+// a Go string, so the buffer lifetime is trivially bounded to one call.
+var renderBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
 // ResponseGenerator renders scenario responses into final Response objects.
 type ResponseGenerator struct {
 	funcMap template.FuncMap
@@ -112,8 +120,10 @@ func (g *ResponseGenerator) renderContent(content string, ctx TemplateContext) (
 		g.cache.Store(content, tmpl)
 	}
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, ctx); err != nil {
+	buf := renderBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer renderBufPool.Put(buf)
+	if err := tmpl.Execute(buf, ctx); err != nil {
 		return "", fmt.Errorf("executing template: %w", err)
 	}
 	return buf.String(), nil
