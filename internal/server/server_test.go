@@ -13,6 +13,7 @@ import (
 
 	"github.com/mockagents/mockagents/internal/engine"
 	"github.com/mockagents/mockagents/internal/engine/state"
+	"github.com/mockagents/mockagents/internal/tenancy"
 	"github.com/mockagents/mockagents/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,6 +55,63 @@ func setupTestServer(t *testing.T, agents ...*types.AgentDefinition) (*Server, s
 	})
 
 	return srv, addr
+}
+
+func setupTenantServer(t *testing.T, agents ...*types.AgentDefinition) (*Server, string, string) {
+	t.Helper()
+	tenancyStore, err := tenancy.NewSQLiteStore(filepath.Join(t.TempDir(), "tenancy.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tenancyStore.Close() })
+	tenant, err := tenancyStore.CreateTenant(t.Context(), "acme")
+	require.NoError(t, err)
+	key, err := tenancyStore.CreateAPIKey(t.Context(), tenant.ID, "admin", tenancy.RoleAdmin)
+	require.NoError(t, err)
+
+	registry := engine.NewAgentRegistry()
+	for _, a := range agents {
+		if a.Metadata.TenantID == "ten_acme" {
+			a.Metadata.TenantID = tenant.ID
+		}
+		registry.Register(a)
+	}
+	store := state.NewMemoryStore(5 * time.Minute)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	eng := engine.NewEngine(registry, store, logger)
+
+	agentsDir := t.TempDir()
+	for _, a := range agents {
+		writeAgentFile(t, agentsDir, a)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Port = 0
+	cfg.AgentsDir = agentsDir
+	cfg.TenancyStore = tenancyStore
+
+	srv := New(eng, cfg, logger)
+	require.NoError(t, srv.Listen(), "listen")
+	addr := fmt.Sprintf("http://%s", srv.ListenAddr())
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve() }()
+	_ = errCh
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	return srv, addr, key.Plaintext
+}
+
+func assertModelIDs(t *testing.T, resp *http.Response, want []string) {
+	t.Helper()
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	got := make([]string, 0, len(body.Data))
+	for _, row := range body.Data {
+		got = append(got, row.ID)
+	}
+	assert.ElementsMatch(t, want, got)
 }
 
 func writeAgentFile(t *testing.T, dir string, agent *types.AgentDefinition) {
@@ -117,6 +175,13 @@ func TestServer_HealthCheck(t *testing.T) {
 	assert.NotEmpty(t, body["uptime"])
 }
 
+func TestServer_DefaultConfigBindsLocalhost(t *testing.T) {
+	cfg := DefaultConfig()
+
+	assert.Equal(t, DefaultHost, cfg.Host)
+	assert.Equal(t, "127.0.0.1", cfg.Host)
+}
+
 func TestServer_ListAgents(t *testing.T) {
 	_, addr := setupTestServer(t,
 		testFullAgent("agent-alpha", "model-a"),
@@ -134,6 +199,79 @@ func TestServer_ListAgents(t *testing.T) {
 	assert.Len(t, agents, 2)
 	assert.Equal(t, "agent-alpha", agents[0].Name)
 	assert.Equal(t, "agent-bravo", agents[1].Name)
+}
+
+func TestServer_ModelsScopedByAuthenticatedTenant(t *testing.T) {
+	global := testFullAgent("global-agent", "model-global")
+	tenantAgent := testFullAgent("tenant-agent", "model-tenant")
+	tenantAgent.Metadata.TenantID = "ten_acme"
+
+	srv, addr, apiKey := setupTenantServer(t, global, tenantAgent)
+	_ = srv
+
+	resp, err := http.Get(addr + "/v1/models")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assertModelIDs(t, resp, []string{"model-global"})
+
+	req, err := http.NewRequest(http.MethodGet, addr+"/v1/models", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assertModelIDs(t, resp, []string{"model-global", "model-tenant"})
+}
+
+func TestServer_TenantHeaderCannotSelectTenantAgent(t *testing.T) {
+	global := testFullAgent("global-agent", "model-global")
+	global2 := testFullAgent("global-agent-two", "model-global-two")
+	tenantAgent := testFullAgent("tenant-agent", "model-tenant")
+	tenantAgent.Metadata.TenantID = "ten_acme"
+
+	_, addr, _ := setupTenantServer(t, global, global2, tenantAgent)
+
+	body, _ := json.Marshal(map[string]any{
+		"model": "model-tenant",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hello"},
+		},
+	})
+	req, err := http.NewRequest(http.MethodPost, addr+"/v1/chat/completions", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Mockagents-Tenant", "ten_acme")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+}
+
+func TestServer_ValidAPIKeySelectsTenantAgent(t *testing.T) {
+	global := testFullAgent("global-agent", "model-global")
+	tenantAgent := testFullAgent("tenant-agent", "model-tenant")
+	tenantAgent.Metadata.TenantID = "ten_acme"
+
+	_, addr, apiKey := setupTenantServer(t, global, tenantAgent)
+
+	body, _ := json.Marshal(map[string]any{
+		"model": "model-tenant",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hello"},
+		},
+	})
+	req, err := http.NewRequest(http.MethodPost, addr+"/v1/chat/completions", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 func TestServer_GetAgent(t *testing.T) {

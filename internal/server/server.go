@@ -23,6 +23,7 @@ import (
 )
 
 const (
+	DefaultHost         = "127.0.0.1"
 	DefaultPort         = 8080
 	DefaultReadTimeout  = 30 * time.Second
 	DefaultWriteTimeout = 60 * time.Second
@@ -33,6 +34,7 @@ const (
 
 // Config holds HTTP server configuration.
 type Config struct {
+	Host         string
 	Port         int
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
@@ -61,6 +63,7 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
+		Host:         DefaultHost,
 		Port:         DefaultPort,
 		ReadTimeout:  DefaultReadTimeout,
 		WriteTimeout: DefaultWriteTimeout,
@@ -151,10 +154,13 @@ func New(eng *engine.Engine, cfg Config, logger *slog.Logger) *Server {
 	if s.logWorker != nil {
 		handler = InteractionCapture(s.logWorker)(handler)
 	}
+	handler = WithPrincipalTenantScope(handler)
 	// Tenancy auth gates every /api/v1/* route when multi-tenant mode
 	// is enabled. Health, the OpenAI/Anthropic LLM endpoints, and
 	// /v1/models are left open so load balancers and existing SDKs
-	// keep working without credentials.
+	// keep working without credentials; when those open routes carry
+	// a valid API key, the middleware attaches the principal so model
+	// listing and LLM resolution can be scoped to that tenant.
 	if cfg.TenancyStore != nil {
 		handler = tenancy.AuthMiddleware(cfg.TenancyStore, skipAuth)(handler)
 	}
@@ -166,7 +172,7 @@ func New(eng *engine.Engine, cfg Config, logger *slog.Logger) *Server {
 	handler = observability.HTTPMiddleware(handler)
 
 	s.httpServer = &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Port),
+		Addr:         net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port)),
 		Handler:      handler,
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
@@ -309,7 +315,7 @@ func (s *Server) handleProcessRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.engine.ProcessRequest(&req)
+	resp, err := s.engine.ProcessRequestContext(r.Context(), &req)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if err == engine.ErrAgentNotFound || isNotFound(err) {
@@ -339,9 +345,10 @@ func (s *Server) handleStreamResponse(
 	resp *engine.Response,
 ) {
 	// Resolve streaming config from the agent definition.
-	agent := s.engine.Registry.Get(resp.AgentName)
+	tenantID := engine.TenantIDFromContext(r.Context())
+	agent := s.engine.Registry.GetForTenant(resp.AgentName, tenantID)
 	if agent == nil {
-		agent = s.engine.Registry.GetByModel(resp.Model)
+		agent = s.engine.Registry.GetByModelForTenant(resp.Model, tenantID)
 	}
 
 	var streamCfg *types.StreamingConfig
@@ -396,7 +403,9 @@ func (s *Server) Serve() error {
 	}
 	addr := s.listener.Addr().(*net.TCPAddr)
 	s.logger.Info("MockAgents server started",
-		"addr", fmt.Sprintf("http://localhost:%d", addr.Port),
+		"addr", fmt.Sprintf("http://%s", s.listener.Addr().String()),
+		"host", s.config.Host,
+		"port", addr.Port,
 		"agents", s.engine.Registry.Count(),
 	)
 	if err := s.httpServer.Serve(s.listener); err != nil && err != http.ErrServerClosed {

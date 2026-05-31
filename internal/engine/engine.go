@@ -125,86 +125,89 @@ func (e *Engine) ProcessRequestContext(ctx context.Context, req *InboundRequest)
 
 	// 3. Get or create session.
 	session := e.States.GetOrCreate(req.SessionID, agent.Metadata.Name)
-	session.AppendUserMessage(userMsg)
+	var resp *Response
+	if err := session.ApplyTurn(userMsg, func(turnCount int, variables map[string]any) (string, []state.ToolCallMsg, error) {
+		// 4. Match scenario.
+		matchResult := e.Matcher.MatchWithCaptures(agent.Spec.Behavior.Scenarios, userMsg, turnCount)
 
-	// 4. Match scenario.
-	matchResult := e.Matcher.MatchWithCaptures(agent.Spec.Behavior.Scenarios, userMsg, session.TurnCount)
-
-	var scenario *types.Scenario
-	var captures map[string]string
-	if matchResult != nil {
-		scenario = matchResult.Scenario
-		captures = matchResult.Captures
-	} else {
-		// Built-in fallback when no scenario matches and no default defined.
-		e.Logger.Warn("no matching scenario, using built-in fallback",
-			"agent", agent.Metadata.Name,
-			"message", truncate(userMsg, 100),
-		)
-		scenario = &types.Scenario{
-			Name: "_fallback",
-			Response: types.ScenarioResponse{
-				Content: fmt.Sprintf("Mock response from %s", agent.Metadata.Name),
-			},
-		}
-	}
-
-	e.Logger.Info("scenario matched",
-		"agent", agent.Metadata.Name,
-		"scenario", scenario.Name,
-		"turn", session.TurnCount,
-	)
-
-	// 5. Generate response.
-	tmplCtx := TemplateContext{
-		Agent:      agent,
-		Message:    userMsg,
-		TurnNumber: session.TurnCount,
-		SessionID:  session.ID,
-		Vars:       session.Variables,
-		Match:      captures,
-	}
-	resp, err := e.Generator.Generate(agent, scenario, tmplCtx)
-	if err != nil {
-		wrapped := fmt.Errorf("generating response for agent %q: %w", agent.Metadata.Name, err)
-		if traceOn {
-			observability.RecordError(span, wrapped)
-		}
-		return nil, wrapped
-	}
-	if traceOn {
-		span.SetAttributes(
-			attribute.String("agent.scenario", scenario.Name),
-			attribute.Int("agent.tool_calls", len(resp.ToolCalls)),
-		)
-	}
-
-	// 6. Process tool calls — resolve responses against tool definitions.
-	if len(resp.ToolCalls) > 0 && len(agent.Spec.Tools) > 0 {
-		results, err := e.ToolProcessor.ProcessToolCalls(resp.ToolCalls, agent.Spec.Tools)
-		if err != nil {
-			e.Logger.Warn("tool call processing error",
+		var scenario *types.Scenario
+		var captures map[string]string
+		if matchResult != nil {
+			scenario = matchResult.Scenario
+			captures = matchResult.Captures
+		} else {
+			// Built-in fallback when no scenario matches and no default defined.
+			e.Logger.Warn("no matching scenario, using built-in fallback",
 				"agent", agent.Metadata.Name,
-				"error", err,
+				"message", truncate(userMsg, 100),
+			)
+			scenario = &types.Scenario{
+				Name: "_fallback",
+				Response: types.ScenarioResponse{
+					Content: fmt.Sprintf("Mock response from %s", agent.Metadata.Name),
+				},
+			}
+		}
+
+		e.Logger.Info("scenario matched",
+			"agent", agent.Metadata.Name,
+			"scenario", scenario.Name,
+			"turn", turnCount,
+		)
+
+		// 5. Generate response.
+		tmplCtx := TemplateContext{
+			Agent:      agent,
+			Message:    userMsg,
+			TurnNumber: turnCount,
+			SessionID:  session.ID,
+			Vars:       variables,
+			Match:      captures,
+		}
+		generated, err := e.Generator.Generate(agent, scenario, tmplCtx)
+		if err != nil {
+			wrapped := fmt.Errorf("generating response for agent %q: %w", agent.Metadata.Name, err)
+			if traceOn {
+				observability.RecordError(span, wrapped)
+			}
+			return "", nil, wrapped
+		}
+		resp = generated
+		if traceOn {
+			span.SetAttributes(
+				attribute.String("agent.scenario", scenario.Name),
+				attribute.Int("agent.tool_calls", len(resp.ToolCalls)),
 			)
 		}
-		resp.ToolResults = results
 
-		e.Logger.Info("tool calls processed",
-			"agent", agent.Metadata.Name,
-			"count", len(results),
-		)
-	}
+		// 6. Process tool calls — resolve responses against tool definitions.
+		if len(resp.ToolCalls) > 0 && len(agent.Spec.Tools) > 0 {
+			results, err := e.ToolProcessor.ProcessToolCalls(resp.ToolCalls, agent.Spec.Tools)
+			if err != nil {
+				e.Logger.Warn("tool call processing error",
+					"agent", agent.Metadata.Name,
+					"error", err,
+				)
+			}
+			resp.ToolResults = results
 
-	// 7. Update session state.
-	var toolCallMsgs []state.ToolCallMsg
-	for _, tc := range resp.ToolCalls {
-		toolCallMsgs = append(toolCallMsgs, state.ToolCallMsg{
-			Name:      tc.Name,
-			Arguments: tc.Arguments,
-		})
+			e.Logger.Info("tool calls processed",
+				"agent", agent.Metadata.Name,
+				"count", len(results),
+			)
+		}
+
+		var toolCallMsgs []state.ToolCallMsg
+		for _, tc := range resp.ToolCalls {
+			toolCallMsgs = append(toolCallMsgs, state.ToolCallMsg{
+				Name:      tc.Name,
+				Arguments: tc.Arguments,
+			})
+		}
+		return resp.Content, toolCallMsgs, nil
+	}); err != nil {
+		return nil, err
 	}
-	session.AppendAssistantMessage(resp.Content, toolCallMsgs)
 	e.States.Save(session)
 
 	// 8. Inject latency now that the real work is done. Sleeping here keeps

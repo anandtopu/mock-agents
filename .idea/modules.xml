@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/mock-agents.iml" filepath="$PROJECT_DIR$/.idea/mock-agents.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/mockagents.iml" filepath="$PROJECT_DIR$/.idea/mockagents.iml" />
     </modules>
   </component>
 </project>

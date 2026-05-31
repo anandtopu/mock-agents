@@ -68,6 +68,10 @@ func (h *LogHandlers) ListLogs(w http.ResponseWriter, r *http.Request) {
 		Since:     r.URL.Query().Get("since"),
 		Until:     r.URL.Query().Get("until"),
 	}
+	if tenantID := callerTenantID(r); tenantID != "" {
+		filter.TenantID = tenantID
+		filter.FilterTenantID = true
+	}
 
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		limit, err := strconv.Atoi(limitStr)
@@ -143,6 +147,12 @@ func (h *LogHandlers) GetLog(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if tenantID := callerTenantID(r); tenantID != "" && log.TenantID != tenantID {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": fmt.Sprintf("log %d not found", id),
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, log)
 }
 
@@ -155,7 +165,15 @@ func (h *LogHandlers) DeleteLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	count, err := h.Store.DeleteAll(r.Context())
+	var (
+		count int64
+		err   error
+	)
+	if tenantID := callerTenantID(r); tenantID != "" {
+		count, err = h.Store.DeleteForTenant(r.Context(), tenantID)
+	} else {
+		count, err = h.Store.DeleteAll(r.Context())
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": fmt.Sprintf("deleting logs: %s", err),
@@ -177,12 +195,12 @@ func (h *LogHandlers) DeleteLogs(w http.ResponseWriter, r *http.Request) {
 // request under sustained load.
 //
 // Safe because:
-//   1. The captured body is only ever read via snapshot(), which
-//      copies bytes into a new slice the worker owns.
-//   2. Release clears ResponseWriter to nil before returning to the
-//      pool, so a stale pointer can never escape.
-//   3. append(body[:0], ...) preserves the backing array across Put
-//      cycles without retaining references to the old request.
+//  1. The captured body is only ever read via snapshot(), which
+//     copies bytes into a new slice the worker owns.
+//  2. Release clears ResponseWriter to nil before returning to the
+//     pool, so a stale pointer can never escape.
+//  3. append(body[:0], ...) preserves the backing array across Put
+//     cycles without retaining references to the old request.
 var captureWriterPool = sync.Pool{
 	New: func() any { return &captureWriter{} },
 }
@@ -280,6 +298,7 @@ func InteractionCapture(worker *LogWorker) func(http.Handler) http.Handler {
 
 			entry := &storage.InteractionLog{
 				Timestamp:      start.UTC().Format(time.RFC3339),
+				TenantID:       engine.TenantIDFromContext(r.Context()),
 				RequestMethod:  r.Method,
 				RequestPath:    path,
 				ResponseStatus: cw.statusCode,
@@ -462,6 +481,9 @@ func (h *LogHandlers) StreamLogs(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			row := annotate(*entry, h.Prices)
+			if tenantID := callerTenantID(r); tenantID != "" && row.TenantID != tenantID {
+				continue
+			}
 			buf, err := json.Marshal(row)
 			if err != nil {
 				// Malformed rows are skipped rather than dropping

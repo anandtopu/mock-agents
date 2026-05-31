@@ -1,6 +1,6 @@
 # MockAgents — Implementation Progress
 
-**Last updated:** 2026-04-15 (Selective bulk rotation ?except=self)
+**Last updated:** 2026-05-30 (Architecture review hardening)
 **Source of truth:** this file. Other `docs/` pages describe the *design
 intent* from the original product plan; when those pages and this file
 disagree, this file wins.
@@ -36,7 +36,7 @@ All residual Phase 1 P1 carry-overs are now closed:
 > entry point that explains where the codebase sits and what to
 > tackle next. The rest of this file is the slice-by-slice ledger.
 
-### Where we are right now (2026-04-15)
+### Where we are right now (2026-05-30)
 
 **Phase 1 MVP**: Complete with no residual P1s.
 **Phase 2 / 3**: All v0.1 slices landed (multi-agent, record/replay,
@@ -48,7 +48,7 @@ streaming cassettes).
 + TypeScript SDK streaming, GUI v0.2 cost/audit/log-detail/live
 feed, Helm v0.2 (HPA/PDB/NetworkPolicy/ServiceMonitor), MCP v0.2
 (completion/logging/notifications), tenant-scoped agent isolation.
-**Phase 4 v0.3 (current focus)**: 21 slices landed —
+**Phase 4 v0.3 (current focus)**: 22 slices landed —
 Go SDK streaming + in-process (§2.31), GUI admin auth (§2.32),
 MCP v0.3 bidirectional (§2.33), GUI live feed via SSE (§2.34),
 GUI config editor (§2.35), GUI pipeline DAG viewer (§2.36), API
@@ -73,7 +73,10 @@ burn-session emergency rotation — self-rotation that
 never returns the new plaintext to a compromised
 browser (§2.50), selective bulk rotation —
 `?except=self` lets admins rotate every key in a
-tenant without locking themselves out (§2.51). All
+tenant without locking themselves out (§2.51),
+architecture review hardening — localhost bind by
+default, principal-derived tenant scope, tenant-scoped
+observability, and same-session atomic turn mutation (§2.52). All
 four document kinds (Agent, Pipeline, TestSuite, MCPServer) flow
 through the same rule-based validator plumbing AND a second
 cross-document pass resolves every reference across a directory.
@@ -121,6 +124,7 @@ billing are the only known gaps left.
 | Bulk tenant-key rotation                               | §2.49   |
 | Burn-session emergency rotation + /me/burn             | §2.50   |
 | Selective bulk rotation (?except=self)                 | §2.51   |
+| Architecture review hardening                          | §2.52   |
 
 Test suite headcount at the checkpoint:
 - Go: **21 packages**, full suite green, `go vet` clean. Total
@@ -4071,10 +4075,50 @@ because `SetMaxOpenConns(1)` held the connection inside a still-open
 `Rows` iterator while `UPDATE last_used` ran. Fix: drain candidates
 into memory and close rows before the update. Documented inline.
 
-**Scope limit**: this slice protects only the control plane (`/api/v1/*`).
-LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/models`)
-remain open — clients send their own provider API keys which MockAgents
-deliberately ignores.
+**Scope limit**: this slice originally protected only the control plane
+(`/api/v1/*`). The 2026-05-30 hardening pass (§2.52) keeps LLM
+endpoints compatible with anonymous local clients while honoring valid
+MockAgents API keys for tenant-scoped model listing and request
+resolution.
+
+### 2.52 Architecture review hardening  *(server + tenancy + storage + engine)*
+
+| Item                         | Location |
+| ---------------------------- | -------- |
+| Localhost default bind        | `internal/server/server.go`, `cmd/mockagents/start.go` — `Config.Host`, `DefaultHost=127.0.0.1`, `--host` and `MOCKAGENTS_HOST` |
+| Container bind opt-in         | `Dockerfile`, `docker-compose.yml`, `deploy/helm/mockagents/*` — container paths explicitly pass or set `0.0.0.0` |
+| Principal-derived tenant      | `internal/tenancy/middleware.go`, `internal/server/middleware.go`, `internal/adapter/{openai,anthropic}.go` — valid API keys attach the tenant; `X-Mockagents-Tenant` no longer controls scope |
+| Scoped model listing          | `internal/adapter/openai.go` — `/v1/models` lists global-only for anonymous callers, global + tenant agents for authenticated callers |
+| Tenant-scoped observability   | `internal/storage/{models,sqlite}.go`, `internal/server/{log_handlers,costs_handler}.go` — `tenant_id` persisted, migrated, queried, deleted, streamed, and cost-aggregated by tenant |
+| Same-session turn atomicity    | `internal/engine/engine.go`, `internal/engine/state/{session,store}.go` — per-session lock wraps user append, scenario match, response generation, tool processing, and assistant append |
+| Tests                         | `internal/server/server_test.go`, `internal/server/log_hardening_test.go`, `internal/storage/sqlite_test.go`, `internal/engine/session_concurrency_test.go` |
+| Verification                  | `go test ./internal/storage ./internal/server ./internal/adapter ./internal/tenancy -count=1` |
+
+Closes the P0 architecture review hardening lane (AHR-01, AHR-02,
+AHR-03) plus AHR-04a from `docs/sprint-backlogs.md`.
+
+What landed:
+
+- The local binary now binds to loopback by default. Operators must
+  explicitly choose `--host 0.0.0.0` (or `MOCKAGENTS_HOST=0.0.0.0`)
+  to expose the server outside the machine.
+- Multi-tenant LLM endpoints remain SDK-compatible: anonymous calls
+  still work for global agents, while valid MockAgents API keys are
+  resolved opportunistically and copied into the engine tenant context.
+  Invalid placeholder provider keys on skipped LLM routes are ignored
+  so existing local OpenAI clients using `api_key="mock"` keep working.
+- The spoofable `X-Mockagents-Tenant` request header is no longer read
+  by OpenAI or Anthropic adapters. Tenant scope now comes only from a
+  resolved API-key principal.
+- `/v1/models` uses the same tenant-visible registry view as request
+  resolution, preventing anonymous callers from enumerating tenant
+  models.
+- Interaction logs gained `tenant_id` with a migration for existing
+  SQLite databases. Log list/detail/delete, cost aggregation, and SSE
+  live feed delivery all filter by the caller's tenant id when present.
+- Same-session engine turns now run inside `Session.ApplyTurn`, so
+  concurrent requests for one session cannot interleave the user append,
+  turn-number match, template variable read, and assistant append.
 
 ---
 

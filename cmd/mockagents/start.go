@@ -33,18 +33,24 @@ and supports hot-reload via the management API.`,
 }
 
 var (
+	host     string
 	port     int
 	jsonLogs bool
 	watchDir bool
 )
 
 func init() {
+	defaultHost := server.DefaultHost
+	if envHost := strings.TrimSpace(os.Getenv("MOCKAGENTS_HOST")); envHost != "" {
+		defaultHost = envHost
+	}
 	defaultPort := server.DefaultPort
 	if envPort := os.Getenv("MOCKAGENTS_PORT"); envPort != "" {
 		if p, err := fmt.Sscanf(envPort, "%d", &defaultPort); p != 1 || err != nil {
 			defaultPort = server.DefaultPort
 		}
 	}
+	startCmd.Flags().StringVar(&host, "host", defaultHost, "HTTP server bind address")
 	startCmd.Flags().IntVarP(&port, "port", "p", defaultPort, "HTTP server port")
 	startCmd.Flags().BoolVar(&jsonLogs, "json-logs", false, "Output logs in JSON format")
 	startCmd.Flags().BoolVarP(&watchDir, "watch", "w", false, "Auto-reload agent YAML files on change (fsnotify)")
@@ -142,6 +148,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Configure and start server.
 	cfg := server.DefaultConfig()
+	cfg.Host = host
 	cfg.Port = port
 	cfg.AgentsDir = agentsDir
 	cfg.Version = version
@@ -270,7 +277,7 @@ func bootstrapTenancy(ctx context.Context, store *tenancy.SQLiteStore, logger *s
 	}
 	fmt.Fprintln(os.Stderr, "================================================================")
 	fmt.Fprintln(os.Stderr, "MockAgents multi-tenant mode enabled.")
-	fmt.Fprintf(os.Stderr,  "Bootstrap admin key (shown once): %s\n", result.Plaintext)
+	fmt.Fprintf(os.Stderr, "Bootstrap admin key (shown once): %s\n", result.Plaintext)
 	fmt.Fprintln(os.Stderr, "Store this in your password manager. Use it via:")
 	fmt.Fprintln(os.Stderr, "  Authorization: Bearer <key>   or   X-Api-Key: <key>")
 	fmt.Fprintln(os.Stderr, "================================================================")

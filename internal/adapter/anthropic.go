@@ -18,7 +18,7 @@ type AnthropicRequest struct {
 	Messages  []AnthropicMessage `json:"messages"`
 	System    string             `json:"system,omitempty"`
 	Tools     []AnthropicTool    `json:"tools,omitempty"`
-	MaxTokens int               `json:"max_tokens,omitempty"`
+	MaxTokens int                `json:"max_tokens,omitempty"`
 	Stream    bool               `json:"stream,omitempty"`
 }
 
@@ -39,14 +39,14 @@ type AnthropicTool struct {
 
 // AnthropicResponse represents an Anthropic Messages API response.
 type AnthropicResponse struct {
-	ID           string                `json:"id"`
-	Type         string                `json:"type"`
-	Role         string                `json:"role"`
-	Content      []AnthropicContent    `json:"content"`
-	Model        string                `json:"model"`
-	StopReason   string                `json:"stop_reason"`
-	StopSequence *string               `json:"stop_sequence"`
-	Usage        AnthropicUsage        `json:"usage"`
+	ID           string             `json:"id"`
+	Type         string             `json:"type"`
+	Role         string             `json:"role"`
+	Content      []AnthropicContent `json:"content"`
+	Model        string             `json:"model"`
+	StopReason   string             `json:"stop_reason"`
+	StopSequence *string            `json:"stop_sequence"`
+	Usage        AnthropicUsage     `json:"usage"`
 }
 
 // AnthropicContent represents a content block in the response.
@@ -105,13 +105,7 @@ func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request
 		Stream:    req.Stream,
 	}
 
-	// Optional tenant override — see openai.go for the rationale.
-	ctx := r.Context()
-	if tid := r.Header.Get("X-Mockagents-Tenant"); tid != "" {
-		ctx = engine.WithTenantID(ctx, tid)
-	}
-
-	resp, err := h.Engine.ProcessRequestContext(ctx, inbound)
+	resp, err := h.Engine.ProcessRequestContext(r.Context(), inbound)
 	if err != nil {
 		if ce := engine.AsChaosError(err); ce != nil {
 			if ce.RetryAfter > 0 {
@@ -140,9 +134,10 @@ func (h *AnthropicHandler) HandleMessages(w http.ResponseWriter, r *http.Request
 
 	// Stream or JSON.
 	if req.Stream {
-		agent := h.Engine.Registry.GetByModel(req.Model)
+		tenantID := engine.TenantIDFromContext(r.Context())
+		agent := h.Engine.Registry.GetByModelForTenant(req.Model, tenantID)
 		if agent == nil {
-			agents := h.Engine.Registry.List()
+			agents := h.Engine.Registry.ListForTenant(tenantID)
 			if len(agents) == 1 {
 				agent = agents[0]
 			}

@@ -147,6 +147,46 @@ Every slice below shipped with tests and, where applicable, a live smoke-test ru
 
 Phase 1 MVP alpha has no remaining P1 blockers: both carry-overs (US-2.3 hot reload, US-12.2 performance benchmarks) are closed. Every Phase 2/3/4 v0.1 slice is independently shippable. Phase 4 v0.2 work is in flight — see PROGRESS.md §1A "Resume Notes" for the active checkpoint and `docs/sprint-backlogs.md` "Active Sprint" for the recommended next slice.
 
+### Architecture Review Hardening Backlog (2026-05-30)
+
+Architect review on 2026-05-30 identified a focused hardening slice
+that should precede additional SaaS-tier expansion. This section is
+tracked separately from the historical MVP metrics above because the
+MVP is already closed; task-level planning lives in
+`docs/sprint-backlogs.md` under "Active Hardening Sprint".
+
+| ID | Title | Priority | Points | Rationale |
+| -- | ----- | -------- | ------ | --------- |
+| AHR-01 | Runtime exposure control | P0 | 3 | PRD requires localhost binding by default, but the server currently listens on all interfaces. |
+| AHR-02 | Tenant isolation closure | P0 | 5 | LLM-compatible endpoints must not let unauthenticated callers select tenant scope or enumerate foreign models. |
+| AHR-03 | Tenant-scoped observability data | P0 | 8 | Logs, costs, streams, metrics, and deletes need tenant filters before multi-tenant usage is credible. |
+| AHR-04 | Session state concurrency | P1 | 5 | Same-session concurrent requests currently mutate shared session objects without an atomic update boundary. |
+| AHR-05 | Interaction log fidelity | P1 | 5 | The log schema promises request/session/protocol/scenario/tool metadata that is not fully populated today. |
+| AHR-06 | CORS and GUI cookie hardening | P1 | 3 | Multi-tenant deployments need configurable origins and environment-aware secure cookies. |
+| AHR-07 | Adapter registration boundary | P2 | 5 | The server still hardwires protocol handlers, which diverges from the plugin-first architecture goal. |
+| AHR-08 | Release hygiene and contract checks | P2 | 3 | License metadata, tracked generated artifacts, and API/SDK drift checks need cleanup before release automation. |
+
+#### Recommended Execution Order
+
+1. **P0 security lane:** AHR-01, AHR-02, AHR-03.
+2. **P1 correctness and operations lane:** AHR-04, AHR-05, AHR-06.
+3. **P2 architecture and release hygiene lane:** AHR-07, AHR-08.
+
+The P0 lane should be completed sequentially because AHR-03 depends
+on the principal-derived tenant semantics from AHR-02. AHR-04 and
+AHR-06 can run in parallel once the P0 interfaces are clear. AHR-07
+should wait until the route/auth behavior is stable so the adapter
+abstraction captures the right contract.
+
+**Implementation checkpoint (2026-05-30):** AHR-01 through AHR-03 and
+AHR-04a are
+landed. The server now binds to `127.0.0.1` by default, container
+deployments opt into `0.0.0.0`, tenant scope is derived from resolved
+API-key principals instead of `X-Mockagents-Tenant`, `/v1/models` is
+tenant-scoped, and interaction logs/cost/live-feed surfaces carry and
+filter by tenant id. Same-session engine turns now mutate under a
+per-session critical section.
+
 ### Active checkpoint (2026-04-14)
 
 Cross-suite test counts at the latest commit:

@@ -64,6 +64,11 @@ affinity: {}
 # -- Server log level: debug, info, warn, error.
 logLevel: info
 
+# -- Bind address inside the container. The CLI defaults to
+# -- 127.0.0.1 for local binaries; chart deployments opt into
+# -- 0.0.0.0 so the Kubernetes Service can reach the pod.
+host: 0.0.0.0
+
 service:
   type: ClusterIP
   # -- HTTP port exposed to clients.

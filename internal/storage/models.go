@@ -4,6 +4,7 @@ package storage
 type InteractionLog struct {
 	ID             int64  `json:"id"`
 	Timestamp      string `json:"timestamp"`
+	TenantID       string `json:"tenant_id,omitempty"`
 	AgentName      string `json:"agent_name"`
 	SessionID      string `json:"session_id"`
 	Protocol       string `json:"protocol"`
@@ -21,12 +22,14 @@ type InteractionLog struct {
 
 // InteractionFilter specifies query criteria for log retrieval.
 type InteractionFilter struct {
-	AgentName string
-	SessionID string
-	Since     string // ISO 8601 timestamp
-	Until     string // ISO 8601 timestamp
-	Limit     int
-	Offset    int
+	TenantID       string
+	FilterTenantID bool
+	AgentName      string
+	SessionID      string
+	Since          string // ISO 8601 timestamp
+	Until          string // ISO 8601 timestamp
+	Limit          int
+	Offset         int
 }
 
 // DefaultLimit is the default number of log entries returned.

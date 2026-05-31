@@ -74,6 +74,11 @@ func AuthMiddleware(store Store, skip func(*http.Request) bool) func(http.Handle
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if skip != nil && skip(r) {
+				if key := ExtractAPIKey(r); key != "" {
+					if principal, err := store.Resolve(r.Context(), key); err == nil {
+						r = r.WithContext(WithPrincipal(r.Context(), principal))
+					}
+				}
 				next.ServeHTTP(w, r)
 				return
 			}

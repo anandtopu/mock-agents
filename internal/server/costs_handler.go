@@ -46,10 +46,10 @@ type CostsResponse struct {
 //
 // Query parameters:
 //
-//   since  RFC3339 lower bound on log timestamp
-//   until  RFC3339 upper bound
-//   agent  restrict aggregation to a single agent
-//   limit  max rows to scan (default 1000, max 10000)
+//	since  RFC3339 lower bound on log timestamp
+//	until  RFC3339 upper bound
+//	agent  restrict aggregation to a single agent
+//	limit  max rows to scan (default 1000, max 10000)
 func (h *CostsHandlers) ListCosts(w http.ResponseWriter, r *http.Request) {
 	if h.Store == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
@@ -63,6 +63,10 @@ func (h *CostsHandlers) ListCosts(w http.ResponseWriter, r *http.Request) {
 		Since:     r.URL.Query().Get("since"),
 		Until:     r.URL.Query().Get("until"),
 		Limit:     1000,
+	}
+	if tenantID := callerTenantID(r); tenantID != "" {
+		filter.TenantID = tenantID
+		filter.FilterTenantID = true
 	}
 	if ls := r.URL.Query().Get("limit"); ls != "" {
 		n, err := strconv.Atoi(ls)

@@ -26,6 +26,7 @@ const schema = `
 CREATE TABLE IF NOT EXISTS interaction_logs (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp       TEXT    NOT NULL DEFAULT (datetime('now')),
+    tenant_id       TEXT    NOT NULL DEFAULT '',
     agent_name      TEXT    NOT NULL,
     session_id      TEXT    NOT NULL DEFAULT '',
     protocol        TEXT    NOT NULL DEFAULT '',
@@ -87,19 +88,59 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrating schema: %w", err)
+	}
 
 	return &SQLiteStore{db: db}, nil
+}
+
+func migrate(db *sql.DB) error {
+	hasTenant, err := columnExists(db, "interaction_logs", "tenant_id")
+	if err != nil {
+		return err
+	}
+	if !hasTenant {
+		if _, err := db.Exec(`ALTER TABLE interaction_logs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_logs_tenant ON interaction_logs(tenant_id)`)
+	return err
+}
+
+func columnExists(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // Log inserts a single interaction log record.
 func (s *SQLiteStore) Log(ctx context.Context, entry *InteractionLog) error {
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO interaction_logs
-			(timestamp, agent_name, session_id, protocol, request_method, request_path,
+			(timestamp, tenant_id, agent_name, session_id, protocol, request_method, request_path,
 			 request_body, response_status, response_body, latency_ms,
 			 tool_calls_count, streaming, error, scenario_name)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		entry.Timestamp, entry.AgentName, entry.SessionID, entry.Protocol,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		entry.Timestamp, entry.TenantID, entry.AgentName, entry.SessionID, entry.Protocol,
 		entry.RequestMethod, entry.RequestPath,
 		entry.RequestBody, entry.ResponseStatus, entry.ResponseBody,
 		entry.LatencyMs, entry.ToolCallsCount, boolToInt(entry.Streaming),
@@ -120,13 +161,17 @@ func (s *SQLiteStore) Log(ctx context.Context, entry *InteractionLog) error {
 
 // Query retrieves interaction logs matching the given filter.
 func (s *SQLiteStore) Query(ctx context.Context, filter InteractionFilter) ([]InteractionLog, error) {
-	query := `SELECT id, timestamp, agent_name, session_id, protocol,
+	query := `SELECT id, timestamp, tenant_id, agent_name, session_id, protocol,
 		request_method, request_path, request_body, response_status,
 		response_body, latency_ms, tool_calls_count, streaming, error, scenario_name
 		FROM interaction_logs WHERE 1=1`
 
 	var args []any
 
+	if filter.FilterTenantID {
+		query += " AND tenant_id = ?"
+		args = append(args, filter.TenantID)
+	}
 	if filter.AgentName != "" {
 		query += " AND agent_name = ?"
 		args = append(args, filter.AgentName)
@@ -171,7 +216,7 @@ func (s *SQLiteStore) Query(ctx context.Context, filter InteractionFilter) ([]In
 		var streaming int
 		var errStr, reqBody, respBody, scenarioName sql.NullString
 		if err := rows.Scan(
-			&log.ID, &log.Timestamp, &log.AgentName, &log.SessionID,
+			&log.ID, &log.Timestamp, &log.TenantID, &log.AgentName, &log.SessionID,
 			&log.Protocol, &log.RequestMethod, &log.RequestPath,
 			&reqBody, &log.ResponseStatus,
 			&respBody, &log.LatencyMs, &log.ToolCallsCount,
@@ -192,7 +237,7 @@ func (s *SQLiteStore) Query(ctx context.Context, filter InteractionFilter) ([]In
 // GetByID retrieves a single interaction log by its ID.
 func (s *SQLiteStore) GetByID(ctx context.Context, id int64) (*InteractionLog, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, timestamp, agent_name, session_id, protocol,
+		SELECT id, timestamp, tenant_id, agent_name, session_id, protocol,
 			request_method, request_path, request_body, response_status,
 			response_body, latency_ms, tool_calls_count, streaming, error, scenario_name
 		FROM interaction_logs WHERE id = ?`, id)
@@ -201,7 +246,7 @@ func (s *SQLiteStore) GetByID(ctx context.Context, id int64) (*InteractionLog, e
 	var streaming int
 	var errStr, reqBody, respBody, scenarioName sql.NullString
 	if err := row.Scan(
-		&log.ID, &log.Timestamp, &log.AgentName, &log.SessionID,
+		&log.ID, &log.Timestamp, &log.TenantID, &log.AgentName, &log.SessionID,
 		&log.Protocol, &log.RequestMethod, &log.RequestPath,
 		&reqBody, &log.ResponseStatus,
 		&respBody, &log.LatencyMs, &log.ToolCallsCount,
@@ -225,6 +270,16 @@ func (s *SQLiteStore) DeleteAll(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx, "DELETE FROM interaction_logs")
 	if err != nil {
 		return 0, fmt.Errorf("deleting logs: %w", err)
+	}
+	return result.RowsAffected()
+}
+
+// DeleteForTenant removes interaction logs owned by tenantID. Returns
+// the number of deleted rows.
+func (s *SQLiteStore) DeleteForTenant(ctx context.Context, tenantID string) (int64, error) {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM interaction_logs WHERE tenant_id = ?", tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("deleting logs for tenant: %w", err)
 	}
 	return result.RowsAffected()
 }

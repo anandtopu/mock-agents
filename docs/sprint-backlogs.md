@@ -41,6 +41,54 @@ ROI order:
    per-tenant agent name collisions, billing/quotas. Needs design
    discussion before implementation.
 
+## Active Hardening Sprint (architecture review, 2026-05-30)
+
+The 2026-05-30 architect review found several issues that should be
+handled before adding more SaaS-tier surface area. The work is ordered
+to close externally visible security and isolation gaps first, then fix
+runtime correctness, observability fidelity, and release hygiene.
+
+### Sprint Goal
+
+Make the current local-first + experimental multi-tenant runtime safe
+enough to extend: localhost binding by default, tenant-derived access
+control everywhere, tenant-scoped logs/costs/models, concurrency-safe
+session state, trustworthy interaction logs, and clean package metadata.
+
+### Workstream Plan
+
+| Workstream | Scope | Priority | Owner | Sequencing |
+| ---------- | ----- | -------- | ----- | ---------- |
+| AHR-01 Runtime exposure control | Add server host config and `--host`; default bind to `127.0.0.1`; update Docker/Helm to opt into `0.0.0.0`; add tests. | P0 | BE-1 | First |
+| AHR-02 Tenant isolation closure | Remove untrusted tenant header semantics; derive tenant only from authenticated principal; scope `/v1/models` and LLM endpoint resolution. | P0 | BE-2 | First |
+| AHR-03 Tenant-scoped observability data | Add tenant id to interaction logs; filter logs, costs, live streams, stream metrics, and deletes by tenant; add migrations/tests. | P0 | BE-2 | After AHR-02 |
+| AHR-04 Session state concurrency | Make per-session mutation atomic via store update closure or per-session mutex; add concurrent same-session tests and CI race guidance. | P1 | BE-3 | Parallel after AHR-01 |
+| AHR-05 Interaction log fidelity | Capture sanitized request body, real `X-Session-Id`, protocol, scenario, tool count, response error, and truncation status. | P1 | BE-1 | After AHR-03 schema decision |
+| AHR-06 CORS and GUI cookie hardening | Make CORS origins/headers configurable; include `X-Api-Key`; set `secure` cookies when configured for HTTPS. | P1 | DX-1 | Parallel with AHR-02 |
+| AHR-07 Adapter registration boundary | Introduce adapter registration/mounting interface so server does not directly hardwire OpenAI and Anthropic handlers. | P2 | BE-3 | After P0/P1 stabilization |
+| AHR-08 Release hygiene and contract checks | Align license metadata to Apache 2.0, expand `.gitignore`, remove generated artifacts from tracking, add schema/API/SDK drift checks. | P2 | DX-1 | Parallel, low blast radius |
+
+### Task Board
+
+| Task ID | Task | Story | Owner | Est (days) | Priority | Status | Dependencies | Acceptance Criteria |
+| ------- | ---- | ----- | ----- | ---------- | -------- | ------ | ------------ | ------------------- |
+| AHR-01a | Add `Host` to server config and `--host` CLI flag | AHR-01 | BE-1 | 0.5 | P0 | DONE | -- | Default server listen address is `127.0.0.1:8080`; tests cover configured host. |
+| AHR-01b | Update Docker, Compose, Helm, and docs for explicit `0.0.0.0` bind | AHR-01 | BE-1 | 0.5 | P0 | DONE | AHR-01a | Container deployments remain reachable; local binary remains localhost-only. |
+| AHR-02a | Replace `X-Mockagents-Tenant` trust with principal-derived tenant context | AHR-02 | BE-2 | 0.75 | P0 | DONE | -- | Unauthenticated requests cannot select tenant-scoped agents by header. |
+| AHR-02b | Scope `/v1/models` to the authenticated tenant or global-only anonymous view | AHR-02 | BE-2 | 0.5 | P0 | DONE | AHR-02a | Model listing never exposes foreign tenant agents. |
+| AHR-03a | Add tenant id to interaction log model, SQLite schema, and insert path | AHR-03 | BE-2 | 0.75 | P0 | DONE | AHR-02a | New log rows include tenant id; existing DBs migrate cleanly. |
+| AHR-03b | Filter log list/detail/delete, cost aggregates, and live streams by tenant | AHR-03 | BE-2 | 1.0 | P0 | DONE | AHR-03a | Tenant callers see only their rows; admin/global behavior is documented. |
+| AHR-04a | Make session state updates atomic for same-session concurrent requests | AHR-04 | BE-3 | 1.0 | P1 | DONE | -- | Concurrent same-session tests do not lose turns or race under `go test -race`. |
+| AHR-04b | Add CI/race documentation for Windows CGO caveat | AHR-04 | BE-3 | 0.25 | P1 | TODO | AHR-04a | CI retains race coverage on supported runners; local caveat is documented. |
+| AHR-05a | Capture sanitized request body and real protocol/session metadata | AHR-05 | BE-1 | 0.75 | P1 | TODO | AHR-03a | Logs show useful request context without leaking common secrets. |
+| AHR-05b | Record scenario name, tool count, error, and truncation state | AHR-05 | BE-1 | 0.75 | P1 | TODO | AHR-05a | Log detail and costs can be trusted for debugging and dashboarding. |
+| AHR-06a | Add configurable CORS origins and allowed headers | AHR-06 | DX-1 | 0.5 | P1 | TODO | -- | Local dev keeps working; multi-tenant deployments can avoid wildcard origins. |
+| AHR-06b | Set secure GUI auth cookies when deployment URL is HTTPS | AHR-06 | DX-1 | 0.5 | P1 | TODO | -- | Cookie flags are environment-aware and covered by tests or type-safe helpers. |
+| AHR-07a | Define adapter route registration interface and migrate OpenAI/Anthropic mounting | AHR-07 | BE-3 | 1.0 | P2 | TODO | AHR-01a | Server registers adapters through a common boundary; behavior unchanged. |
+| AHR-08a | Align package/license metadata and OpenAPI license to Apache 2.0 | AHR-08 | DX-1 | 0.25 | P2 | TODO | -- | README, root LICENSE, PyPI, npm, and OpenAPI metadata agree. |
+| AHR-08b | Expand `.gitignore` and remove generated artifacts from tracking | AHR-08 | DX-1 | 0.5 | P2 | TODO | -- | `.pyc`, `__pycache__`, coverage files, local binaries, egg-info, and DBs are ignored/untracked. |
+| AHR-08c | Add lightweight schema/API/SDK drift check to CI | AHR-08 | DX-1 | 0.75 | P2 | TODO | AHR-08a | CI fails when public API metadata or SDK models drift unintentionally. |
+
 ---
 
 ## Document Info

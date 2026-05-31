@@ -72,6 +72,7 @@ in the NOTES in that case.
 | `persistence.enabled`                | Mount a PVC at `/data` for the SQLite interaction log.   |
 | `env.OTEL_EXPORTER_OTLP_ENDPOINT`    | Ship traces to an OTLP/HTTP collector.                   |
 | `logLevel`                           | `debug`, `info`, `warn`, `error`.                        |
+| `host`                               | Bind address inside the pod; defaults to `0.0.0.0`.      |
 | `extraArgs`                          | Extra flags appended to `mockagents start`.              |
 | `autoscaling.enabled`                | **v0.2** — render an HPA (`autoscaling/v2`) targeting CPU and/or memory. |
 | `podDisruptionBudget.enabled`        | **v0.2** — render a PDB so node drains can't take every replica at once. |

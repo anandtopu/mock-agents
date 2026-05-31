@@ -114,6 +114,10 @@ mockagents mcp                 # Serve a kind:MCPServer definition over HTTP or 
 mockagents contract            # extract or diff agent contracts (CI-friendly)
 ```
 
+`mockagents start` binds to `127.0.0.1` by default. Container and
+remote deployments should opt in explicitly with `--host 0.0.0.0` or
+`MOCKAGENTS_HOST=0.0.0.0`.
+
 ### CI integration
 
 `mockagents test --format junit > report.xml` produces a

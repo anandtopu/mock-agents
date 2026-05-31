@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
@@ -39,6 +40,40 @@ func sampleLog(agent, session string) *InteractionLog {
 func TestSQLiteStore_CreateAndClose(t *testing.T) {
 	store := testStore(t)
 	assert.NotNil(t, store)
+}
+
+func TestSQLiteStore_MigratesTenantColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		CREATE TABLE interaction_logs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+			agent_name TEXT NOT NULL,
+			session_id TEXT NOT NULL DEFAULT '',
+			protocol TEXT NOT NULL DEFAULT '',
+			request_method TEXT NOT NULL DEFAULT 'POST',
+			request_path TEXT NOT NULL DEFAULT '',
+			request_body TEXT,
+			response_status INTEGER NOT NULL DEFAULT 200,
+			response_body TEXT,
+			latency_ms INTEGER NOT NULL DEFAULT 0,
+			tool_calls_count INTEGER DEFAULT 0,
+			streaming INTEGER DEFAULT 0,
+			error TEXT,
+			scenario_name TEXT DEFAULT ''
+		)`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	store, err := NewSQLiteStore(dbPath)
+	require.NoError(t, err)
+	defer store.Close()
+
+	ok, err := columnExists(store.db, "interaction_logs", "tenant_id")
+	require.NoError(t, err)
+	assert.True(t, ok)
 }
 
 func TestSQLiteStore_LogAndQuery(t *testing.T) {
@@ -100,6 +135,45 @@ func TestSQLiteStore_QueryBySession(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, logs, 1)
 	assert.Equal(t, "sess-1", logs[0].SessionID)
+}
+
+func TestSQLiteStore_QueryByTenant(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	a := sampleLog("agent-a", "sess-1")
+	a.TenantID = "ten-a"
+	b := sampleLog("agent-b", "sess-2")
+	b.TenantID = "ten-b"
+	require.NoError(t, store.Log(ctx, a))
+	require.NoError(t, store.Log(ctx, b))
+
+	logs, err := store.Query(ctx, InteractionFilter{TenantID: "ten-a", FilterTenantID: true})
+	require.NoError(t, err)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "ten-a", logs[0].TenantID)
+	assert.Equal(t, "agent-a", logs[0].AgentName)
+}
+
+func TestSQLiteStore_DeleteForTenant(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	a := sampleLog("agent-a", "sess-1")
+	a.TenantID = "ten-a"
+	b := sampleLog("agent-b", "sess-2")
+	b.TenantID = "ten-b"
+	require.NoError(t, store.Log(ctx, a))
+	require.NoError(t, store.Log(ctx, b))
+
+	count, err := store.DeleteForTenant(ctx, "ten-a")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count)
+
+	logs, err := store.Query(ctx, InteractionFilter{})
+	require.NoError(t, err)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "ten-b", logs[0].TenantID)
 }
 
 func TestSQLiteStore_QueryLimit(t *testing.T) {

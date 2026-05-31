@@ -62,10 +62,11 @@ mockagents start [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
+| `--host` | | `127.0.0.1` | HTTP server bind address |
 | `--port` | `-p` | `8080` | HTTP server port |
 | `--json-logs` | | `false` | Output logs in JSON format |
 
-Environment variable: `MOCKAGENTS_PORT`.
+Environment variables: `MOCKAGENTS_HOST`, `MOCKAGENTS_PORT`.
 
 **Examples:**
 
@@ -75,6 +76,9 @@ mockagents start
 
 # Custom port and debug logging
 mockagents start --port 9090 --log-level debug
+
+# Listen on all interfaces for a container or remote test host
+mockagents start --host 0.0.0.0
 
 # JSON logs for CI
 mockagents start --json-logs --log-level warn

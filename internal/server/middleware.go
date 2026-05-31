@@ -9,6 +9,9 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
+
+	"github.com/mockagents/mockagents/internal/engine"
+	"github.com/mockagents/mockagents/internal/tenancy"
 )
 
 type contextKey string
@@ -112,6 +115,19 @@ func ExtractAPIKey(next http.Handler) http.Handler {
 			token := strings.TrimPrefix(auth, "Bearer ")
 			ctx := context.WithValue(r.Context(), APIKeyKey, token)
 			r = r.WithContext(ctx)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// WithPrincipalTenantScope copies the authenticated principal's
+// tenant id onto the engine context. This lets protocol adapters stay
+// tenancy-free while still resolving tenant-owned agents and models
+// from the caller's actual API key rather than from a spoofable header.
+func WithPrincipalTenantScope(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if p := tenancy.PrincipalFrom(r.Context()); p != nil && p.TenantID != "" {
+			r = r.WithContext(engine.WithTenantID(r.Context(), p.TenantID))
 		}
 		next.ServeHTTP(w, r)
 	})

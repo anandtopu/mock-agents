@@ -56,11 +56,17 @@ func (s *MemoryStore) Get(id string) *Session {
 }
 
 func (s *MemoryStore) GetOrCreate(id, agentName string) *Session {
-	if session := s.Get(id); session != nil {
-		return session
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if session, ok := s.sessions[id]; ok {
+		if session.IsExpired() {
+			delete(s.sessions, id)
+		} else {
+			return session
+		}
 	}
 	session := NewSession(id, agentName, s.ttl)
-	s.Save(session)
+	s.sessions[session.ID] = session
 	return session
 }
 

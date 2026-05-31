@@ -1,15 +1,16 @@
 package state
 
 import (
+	"sync"
 	"time"
 )
 
 // Message represents a single message in a conversation.
 type Message struct {
-	Role      string         `json:"role"`
-	Content   string         `json:"content"`
-	ToolCalls []ToolCallMsg  `json:"tool_calls,omitempty"`
-	Timestamp time.Time      `json:"timestamp"`
+	Role      string        `json:"role"`
+	Content   string        `json:"content"`
+	ToolCalls []ToolCallMsg `json:"tool_calls,omitempty"`
+	Timestamp time.Time     `json:"timestamp"`
 }
 
 // ToolCallMsg is a tool call recorded in conversation history.
@@ -20,14 +21,45 @@ type ToolCallMsg struct {
 
 // Session holds the conversation state for a single client session.
 type Session struct {
-	ID         string            `json:"id"`
-	AgentName  string            `json:"agent_name"`
-	Messages   []Message         `json:"messages"`
-	TurnCount  int               `json:"turn_count"`
-	Variables  map[string]any    `json:"variables,omitempty"`
-	CreatedAt  time.Time         `json:"created_at"`
-	LastAccess time.Time         `json:"last_access"`
-	TTL        time.Duration     `json:"-"`
+	mu         sync.Mutex
+	ID         string         `json:"id"`
+	AgentName  string         `json:"agent_name"`
+	Messages   []Message      `json:"messages"`
+	TurnCount  int            `json:"turn_count"`
+	Variables  map[string]any `json:"variables,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	LastAccess time.Time      `json:"last_access"`
+	TTL        time.Duration  `json:"-"`
+}
+
+// WithLocked runs fn while holding the session's mutation lock. Use it
+// for multi-step read/modify/write sequences that must stay atomic for
+// one conversation turn.
+func (s *Session) WithLocked(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn()
+}
+
+// ApplyTurn appends the user message, invokes build with the new turn
+// number and live variables map, then appends the assistant message
+// returned by build. The whole turn is guarded by the session lock so
+// concurrent requests for the same session cannot interleave history
+// updates or scenario matching.
+func (s *Session) ApplyTurn(
+	userContent string,
+	build func(turnCount int, variables map[string]any) (assistantContent string, toolCalls []ToolCallMsg, err error),
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.appendUserMessage(userContent)
+	assistantContent, toolCalls, err := build(s.TurnCount, s.Variables)
+	if err != nil {
+		return err
+	}
+	s.appendAssistantMessage(assistantContent, toolCalls)
+	return nil
 }
 
 // initialMessageCap is the pre-allocated capacity for a new session's
@@ -54,6 +86,12 @@ func NewSession(id, agentName string, ttl time.Duration) *Session {
 
 // AppendUserMessage adds a user message and increments the turn count.
 func (s *Session) AppendUserMessage(content string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.appendUserMessage(content)
+}
+
+func (s *Session) appendUserMessage(content string) {
 	s.Messages = append(s.Messages, Message{
 		Role:      "user",
 		Content:   content,
@@ -65,6 +103,12 @@ func (s *Session) AppendUserMessage(content string) {
 
 // AppendAssistantMessage adds an assistant response to the history.
 func (s *Session) AppendAssistantMessage(content string, toolCalls []ToolCallMsg) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.appendAssistantMessage(content, toolCalls)
+}
+
+func (s *Session) appendAssistantMessage(content string, toolCalls []ToolCallMsg) {
 	s.Messages = append(s.Messages, Message{
 		Role:      "assistant",
 		Content:   content,
@@ -76,6 +120,8 @@ func (s *Session) AppendAssistantMessage(content string, toolCalls []ToolCallMsg
 
 // IsExpired returns true if the session has exceeded its TTL.
 func (s *Session) IsExpired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.TTL <= 0 {
 		return false
 	}
@@ -84,6 +130,8 @@ func (s *Session) IsExpired() bool {
 
 // LatestUserMessage returns the content of the most recent user message.
 func (s *Session) LatestUserMessage() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i := len(s.Messages) - 1; i >= 0; i-- {
 		if s.Messages[i].Role == "user" {
 			return s.Messages[i].Content

@@ -17,27 +17,27 @@ import (
 
 // ChatCompletionRequest represents an OpenAI Chat Completions API request.
 type ChatCompletionRequest struct {
-	Model       string              `json:"model"`
-	Messages    []OpenAIMessage     `json:"messages"`
-	Tools       []OpenAITool        `json:"tools,omitempty"`
-	ToolChoice  any                 `json:"tool_choice,omitempty"`
-	Stream      bool                `json:"stream,omitempty"`
-	Temperature *float64            `json:"temperature,omitempty"`
-	MaxTokens   *int                `json:"max_tokens,omitempty"`
+	Model       string          `json:"model"`
+	Messages    []OpenAIMessage `json:"messages"`
+	Tools       []OpenAITool    `json:"tools,omitempty"`
+	ToolChoice  any             `json:"tool_choice,omitempty"`
+	Stream      bool            `json:"stream,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	MaxTokens   *int            `json:"max_tokens,omitempty"`
 }
 
 // OpenAIMessage represents a message in an OpenAI request/response.
 type OpenAIMessage struct {
-	Role       string              `json:"role"`
-	Content    any                 `json:"content"`
-	ToolCalls  []OpenAIToolCall    `json:"tool_calls,omitempty"`
-	ToolCallID string              `json:"tool_call_id,omitempty"`
+	Role       string           `json:"role"`
+	Content    any              `json:"content"`
+	ToolCalls  []OpenAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 // OpenAITool represents a tool definition in an OpenAI request.
 type OpenAITool struct {
-	Type     string          `json:"type"`
-	Function OpenAIFunction  `json:"function"`
+	Type     string         `json:"type"`
+	Function OpenAIFunction `json:"function"`
 }
 
 // OpenAIFunction describes a function tool.
@@ -64,19 +64,19 @@ type OpenAIFunctionCall struct {
 
 // ChatCompletionResponse represents an OpenAI Chat Completions API response.
 type ChatCompletionResponse struct {
-	ID      string                   `json:"id"`
-	Object  string                   `json:"object"`
-	Created int64                    `json:"created"`
-	Model   string                   `json:"model"`
-	Choices []ChatCompletionChoice   `json:"choices"`
-	Usage   OpenAIUsage              `json:"usage"`
+	ID      string                 `json:"id"`
+	Object  string                 `json:"object"`
+	Created int64                  `json:"created"`
+	Model   string                 `json:"model"`
+	Choices []ChatCompletionChoice `json:"choices"`
+	Usage   OpenAIUsage            `json:"usage"`
 }
 
 // ChatCompletionChoice represents a single choice in the response.
 type ChatCompletionChoice struct {
-	Index        int                    `json:"index"`
-	Message      OpenAIResponseMessage  `json:"message"`
-	FinishReason string                 `json:"finish_reason"`
+	Index        int                   `json:"index"`
+	Message      OpenAIResponseMessage `json:"message"`
+	FinishReason string                `json:"finish_reason"`
 }
 
 // OpenAIResponseMessage is the assistant message in a choice.
@@ -126,16 +126,8 @@ func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Req
 		Stream:    req.Stream,
 	}
 
-	// Stamp the optional tenant header onto the request context so
-	// the engine resolves agents in the caller's tenant scope.
-	// Empty header preserves v0.1 behavior (global agents only).
-	ctx := r.Context()
-	if tid := r.Header.Get("X-Mockagents-Tenant"); tid != "" {
-		ctx = engine.WithTenantID(ctx, tid)
-	}
-
 	// Process through engine.
-	resp, err := h.Engine.ProcessRequestContext(ctx, inbound)
+	resp, err := h.Engine.ProcessRequestContext(r.Context(), inbound)
 	if err != nil {
 		if ce := engine.AsChaosError(err); ce != nil {
 			if ce.RetryAfter > 0 {
@@ -164,9 +156,10 @@ func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Req
 
 	// Stream or JSON response.
 	if req.Stream {
-		agent := h.Engine.Registry.GetByModel(req.Model)
+		tenantID := engine.TenantIDFromContext(r.Context())
+		agent := h.Engine.Registry.GetByModelForTenant(req.Model, tenantID)
 		if agent == nil {
-			agents := h.Engine.Registry.List()
+			agents := h.Engine.Registry.ListForTenant(tenantID)
 			if len(agents) == 1 {
 				agent = agents[0]
 			}
@@ -192,7 +185,7 @@ func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Req
 
 // HandleModels handles GET /v1/models.
 func (h *OpenAIHandler) HandleModels(w http.ResponseWriter, r *http.Request) {
-	agents := h.Engine.Registry.List()
+	agents := h.Engine.Registry.ListForTenant(engine.TenantIDFromContext(r.Context()))
 	models := make([]map[string]any, 0, len(agents))
 	for _, a := range agents {
 		models = append(models, map[string]any{
