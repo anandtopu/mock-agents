@@ -172,8 +172,19 @@ func randomInt(min, max int) int {
 	return min + int(n.Int64())
 }
 
+// maxRandomStringLen bounds the length a template author can request from
+// {{ random_string n }} so a hostile or fat-fingered value (e.g. 1e9) can't
+// allocate gigabytes on the response hot path. Non-positive lengths yield "".
+const maxRandomStringLen = 4096
+
 func randomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	if length <= 0 {
+		return ""
+	}
+	if length > maxRandomStringLen {
+		length = maxRandomStringLen
+	}
 	b := make([]byte, length)
 	for i := range b {
 		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))

@@ -183,6 +183,21 @@ func TestResponseGenerator_InvalidTemplate(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestRandomString_Clamped(t *testing.T) {
+	// Non-positive lengths must yield "" rather than panicking on make([]byte, n<0).
+	assert.Equal(t, "", randomString(0))
+	assert.Equal(t, "", randomString(-1))
+	assert.Equal(t, "", randomString(-1e9))
+
+	// In-range lengths are honored exactly.
+	assert.Len(t, randomString(8), 8)
+	assert.Len(t, randomString(maxRandomStringLen), maxRandomStringLen)
+
+	// Oversized requests are capped so {{ random_string 1e9 }} can't allocate GBs.
+	assert.Len(t, randomString(maxRandomStringLen+1), maxRandomStringLen)
+	assert.Len(t, randomString(1_000_000_000), maxRandomStringLen)
+}
+
 func TestResponseGenerator_ToolCalls(t *testing.T) {
 	g := NewResponseGenerator()
 	agent := testAgent()
