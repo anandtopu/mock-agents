@@ -526,3 +526,55 @@ func TestLogBroadcaster_Close(t *testing.T) {
 	b.Publish(makeEntry(1))
 	b.Close()
 }
+
+// entryForTenant is makeEntry with a tenant tag.
+func entryForTenant(tenantID string) *storage.InteractionLog {
+	e := makeEntry(1)
+	e.TenantID = tenantID
+	return e
+}
+
+// TestBroadcaster_SubscribeTenant_IsolatesTenants is the F-LH-003 guard: a
+// tenant-scoped subscriber only receives its own tenant's rows, and another
+// tenant's flood neither fills its buffer nor inflates its drop counter.
+func TestBroadcaster_SubscribeTenant_IsolatesTenants(t *testing.T) {
+	b := &LogBroadcaster{}
+	subA, cancelA := b.SubscribeTenant(2, "ten-a")
+	defer cancelA()
+
+	// Flood with another tenant's traffic — far more than subA's buffer.
+	for i := 0; i < 50; i++ {
+		b.Publish(entryForTenant("ten-b"))
+	}
+	if d := subA.Dropped(); d != 0 {
+		t.Errorf("ten-a subscriber recorded %d drops from ten-b traffic; want 0", d)
+	}
+	if n := len(subA.C()); n != 0 {
+		t.Errorf("ten-a buffer holds %d cross-tenant entries; want 0", n)
+	}
+
+	// A ten-a entry is still delivered.
+	b.Publish(entryForTenant("ten-a"))
+	select {
+	case got := <-subA.C():
+		if got.TenantID != "ten-a" {
+			t.Errorf("delivered entry for tenant %q, want ten-a", got.TenantID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ten-a entry was not delivered to the ten-a subscriber")
+	}
+}
+
+// TestBroadcaster_EmptyTenantReceivesAll confirms the unscoped Subscribe still
+// fans every tenant's rows out (single-tenant / backward-compatible path).
+func TestBroadcaster_EmptyTenantReceivesAll(t *testing.T) {
+	b := &LogBroadcaster{}
+	sub, cancel := b.Subscribe(8)
+	defer cancel()
+
+	b.Publish(entryForTenant("ten-a"))
+	b.Publish(entryForTenant("ten-b"))
+	if n := len(sub.C()); n != 2 {
+		t.Errorf("unscoped subscriber got %d entries; want 2 (all tenants)", n)
+	}
+}

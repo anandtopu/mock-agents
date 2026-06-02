@@ -37,6 +37,11 @@ type LogBroadcaster struct {
 type LogSubscription struct {
 	ch      chan *storage.InteractionLog
 	dropped atomic.Uint64
+	// tenantID scopes delivery: when non-empty, Publish only enqueues entries
+	// whose TenantID matches, so a noisy tenant's volume never fills (and
+	// drops from) another tenant's buffer (F-LH-003). Empty means "all
+	// tenants" — single-tenant / local-dev mode, where there is no principal.
+	tenantID string
 }
 
 // C returns the receive-only channel the caller should range over.
@@ -64,11 +69,24 @@ const DefaultLogStreamBuffer = 64
 //
 // Passing buffer <= 0 uses DefaultLogStreamBuffer.
 func (b *LogBroadcaster) Subscribe(buffer int) (*LogSubscription, func()) {
+	return b.subscribe(buffer, "")
+}
+
+// SubscribeTenant is Subscribe scoped to a single tenant: Publish delivers
+// only entries whose TenantID matches, so the subscriber's buffer and drop
+// accounting are isolated from other tenants' traffic (F-LH-003). An empty
+// tenantID behaves exactly like Subscribe (all tenants).
+func (b *LogBroadcaster) SubscribeTenant(buffer int, tenantID string) (*LogSubscription, func()) {
+	return b.subscribe(buffer, tenantID)
+}
+
+func (b *LogBroadcaster) subscribe(buffer int, tenantID string) (*LogSubscription, func()) {
 	if buffer <= 0 {
 		buffer = DefaultLogStreamBuffer
 	}
 	sub := &LogSubscription{
-		ch: make(chan *storage.InteractionLog, buffer),
+		ch:       make(chan *storage.InteractionLog, buffer),
+		tenantID: tenantID,
 	}
 	b.mu.Lock()
 	if b.closed {
@@ -106,6 +124,12 @@ func (b *LogBroadcaster) Publish(entry *storage.InteractionLog) {
 	}
 	b.mu.Lock()
 	for sub := range b.subscribers {
+		// Tenant-scoped subscribers only see their own tenant's rows, so a
+		// noisy tenant can't fill another's buffer or inflate its drop count
+		// (F-LH-003). An empty sub.tenantID receives everything.
+		if sub.tenantID != "" && entry.TenantID != sub.tenantID {
+			continue
+		}
 		select {
 		case sub.ch <- entry:
 		default:
