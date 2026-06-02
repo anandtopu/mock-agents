@@ -571,7 +571,11 @@ func (h *LogHandlers) StreamLogs(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	sub, cancel := h.Broadcaster.Subscribe(0)
+	// Subscribe scoped to the caller's tenant so another tenant's volume can't
+	// fill this subscriber's buffer and starve it of its own rows (F-LH-003).
+	// Empty in single-tenant mode = receive everything. The per-row check in
+	// the loop below stays as defense-in-depth.
+	sub, cancel := h.Broadcaster.SubscribeTenant(0, callerTenantID(r))
 	defer cancel()
 
 	ticker := time.NewTicker(heartbeat)
