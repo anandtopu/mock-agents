@@ -73,6 +73,6 @@ _Execute top-down. Each task maps to a finding ID (detail in `01-PER-FILE.md` / 
 
 ## Needs investigation (low-confidence / dependency-gated)
 
-- [ ] `X-DOS-001` YAML half — confirm `config.ValidateBytes`'s YAML lib bounds alias expansion (billion-laughs); if not, the body cap alone is insufficient. Check `internal/config`.
+- [x] `X-DOS-001` YAML half — confirm `config.ValidateBytes`'s YAML lib bounds alias expansion (billion-laughs); if not, the body cap alone is insufficient. Check `internal/config`. **DONE 2026-06-02 — NOT VULNERABLE.** `gopkg.in/yaml.v3 v3.0.1` has a built-in alias-expansion budget: a classic 9^9 billion-laughs document is rejected in <1ms with `"yaml: document contains excessive aliasing"`, on both the raw `yaml.Unmarshal`-into-`interface{}` path AND the `ValidateBytes` path (`yaml.Unmarshal` into a `yaml.Node` keeps aliases unexpanded; the `doc.Decode(&def)` typed decode is where expansion would happen, and that's where the guard fires). So the 1 MiB body cap + the library guard fully mitigate — no code change needed. Regression guard added: `internal/config/TestYAMLBillionLaughs_Bounded` (runs the decode under a 5s timeout to catch a future regression to an unbounded expander).
 - [ ] `X-SEC-001` store half — decide whether tenant scoping lives in `tenancy/store.go` signatures or the handler; the store package was not reviewed here.
 - [ ] `F-LH-003` SSE cross-tenant interference — confirm whether the broadcaster should grow a per-tenant subscription predicate (touches `log_broadcaster.go`).
