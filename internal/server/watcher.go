@@ -26,17 +26,18 @@ import (
 // Create+Write pair (the typical "atomic save" pattern from editors)
 // don't trigger two reloads.
 //
-// Reload model (X-05): this is an incremental, add/replace-only reload.
-// Each file change re-registers exactly one agent via a single
-// Registry.Register call. Register holds the registry's write lock while
-// every read holds the read lock, so a concurrent request never observes a
-// half-updated agent — no transactional bulk-replace is needed because
-// there is no bulk replace (pipelines are not reloaded at all; they are
-// boot-only). Known limitation: the watcher reacts only to
-// Create/Write/Rename, so an agent whose file is DELETED or whose
-// metadata.name is RENAMED stays registered under its old key until the
-// server restarts (Registry.Remove exists but is not wired to fsnotify
-// Remove events, which would require tracking file→agent-name mappings).
+// Reload model (X-05): this is an incremental reload. Each Create/Write/
+// Rename re-registers exactly one agent via a single Registry.Register
+// call, and each Remove (or rename-away) unregisters the agent that file
+// last declared via Registry.Remove. Register/Remove hold the registry's
+// write lock while every read holds the read lock, so a concurrent request
+// never observes a half-updated agent — and no transactional bulk-replace
+// is needed because there is no bulk replace (pipelines are boot-only and
+// not reloaded). The watcher tracks a file→agent-name mapping (fileAgents)
+// so a deletion can find the right agent once the file's content is gone;
+// it only removes an agent when no remaining tracked file still declares
+// that name, which keeps a file *rename* (old path removed, new path added,
+// processed in either order) from dropping the agent.
 type AgentDirWatcher struct {
 	Dir      string
 	Engine   *engine.Engine
@@ -47,18 +48,23 @@ type AgentDirWatcher struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	pending map[string]*time.Timer
-	mu      sync.Mutex
+	// fileAgents maps a watched file path to the agent name it last
+	// registered, so a delete or rename-away can unregister the right agent
+	// (the file's content is gone by the time we react). Guarded by mu.
+	fileAgents map[string]string
+	mu         sync.Mutex
 }
 
 // NewAgentDirWatcher constructs a watcher but does not start it.
 // Call Start to begin observing filesystem events.
 func NewAgentDirWatcher(dir string, eng *engine.Engine, logger *slog.Logger) *AgentDirWatcher {
 	return &AgentDirWatcher{
-		Dir:      dir,
-		Engine:   eng,
-		Logger:   logger,
-		Debounce: 150 * time.Millisecond,
-		pending:  make(map[string]*time.Timer),
+		Dir:        dir,
+		Engine:     eng,
+		Logger:     logger,
+		Debounce:   150 * time.Millisecond,
+		pending:    make(map[string]*time.Timer),
+		fileAgents: make(map[string]string),
 	}
 }
 
@@ -116,10 +122,11 @@ func (w *AgentDirWatcher) loop(ctx context.Context) {
 			if !isAgentFile(event.Name) {
 				continue
 			}
-			// Only react to events that mean "this file now has new
-			// content on disk": Create, Write, and Rename (editor
-			// atomic-save rename-into-place).
-			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) == 0 {
+			// React to events that change what is on disk: Create/Write/
+			// Rename mean "new content to (re)register", and Remove (or the
+			// old name of a rename) means "file gone, maybe unregister".
+			// reloadFile distinguishes the two by whether the file loads.
+			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) == 0 {
 				continue
 			}
 			w.schedule(event.Name)
@@ -154,10 +161,12 @@ func (w *AgentDirWatcher) schedule(path string) {
 func (w *AgentDirWatcher) reloadFile(path string) {
 	result, err := config.LoadFile(path)
 	if err != nil {
-		// A missing file is normal during editor atomic-save (write
-		// temp → rename into place); fsnotify reports the temp name
-		// which vanishes before we get here.
 		if isTransientMissing(err) {
+			// The file is gone. If we had registered an agent from this
+			// path, this is a real deletion (or rename-away), so unregister
+			// it. An untracked path — e.g. an editor temp file that vanished
+			// mid atomic-save — has no mapping and is left alone.
+			w.unregisterFile(path)
 			return
 		}
 		w.Logger.Warn("watcher: failed to load file", "file", path, "error", err)
@@ -179,10 +188,65 @@ func (w *AgentDirWatcher) reloadFile(path string) {
 		return
 	}
 	w.Engine.Registry.Register(result.Definition)
+	w.rememberFile(path, result.Definition.Metadata.Name)
 	w.Logger.Info("watcher: agent reloaded",
 		"agent", result.Definition.Metadata.Name,
 		"file", filepath.Base(path),
 	)
+}
+
+// rememberFile records that path now declares agent `name`. If the path
+// previously declared a different name (an in-file metadata.name rename),
+// the old registration is dropped unless another file still declares it.
+func (w *AgentDirWatcher) rememberFile(path, name string) {
+	w.mu.Lock()
+	prev, had := w.fileAgents[path]
+	w.fileAgents[path] = name
+	w.mu.Unlock()
+	if had && prev != name {
+		w.removeIfUnclaimed(prev, path)
+	}
+}
+
+// unregisterFile handles a file that has disappeared: it drops the path's
+// mapping and unregisters the agent it declared, unless another tracked
+// file still declares that same name.
+func (w *AgentDirWatcher) unregisterFile(path string) {
+	w.mu.Lock()
+	name, ok := w.fileAgents[path]
+	if ok {
+		delete(w.fileAgents, path)
+	}
+	w.mu.Unlock()
+	if !ok {
+		return
+	}
+	w.removeIfUnclaimed(name, path)
+}
+
+// removeIfUnclaimed removes `name` from the registry unless some other
+// tracked file still maps to it. This makes a file rename safe regardless of
+// event ordering: if the new path registered the agent before the old path's
+// removal is processed, the new path still claims the name and we keep it.
+// Caller must not hold w.mu.
+func (w *AgentDirWatcher) removeIfUnclaimed(name, viaPath string) {
+	w.mu.Lock()
+	claimed := false
+	for _, n := range w.fileAgents {
+		if n == name {
+			claimed = true
+			break
+		}
+	}
+	w.mu.Unlock()
+	if claimed {
+		return
+	}
+	if err := w.Engine.Registry.Remove(name); err != nil {
+		// Already gone (e.g. removed by another path under the same name).
+		return
+	}
+	w.Logger.Info("watcher: agent removed", "agent", name, "file", filepath.Base(viaPath))
 }
 
 // isAgentFile reports whether the given path looks like a document

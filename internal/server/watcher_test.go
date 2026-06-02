@@ -172,3 +172,91 @@ func TestWatcherStopIdempotent(t *testing.T) {
 		t.Errorf("unexpected temp dir shape: %s", dir)
 	}
 }
+
+func TestWatcherUnregistersDeletedFile(t *testing.T) {
+	dir := t.TempDir()
+	eng := newTestEngineFromReg()
+	w := NewAgentDirWatcher(dir, eng, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w.Debounce = 20 * time.Millisecond
+	if err := w.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer w.Stop()
+
+	path := writeAgentYAML(t, dir, "to-delete", "bye")
+	if !waitFor(t, 2*time.Second, func() bool {
+		return eng.Registry.Get("to-delete") != nil
+	}) {
+		t.Fatalf("watcher did not register to-delete")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if !waitFor(t, 2*time.Second, func() bool {
+		return eng.Registry.Get("to-delete") == nil
+	}) {
+		t.Fatalf("watcher did not unregister the deleted agent")
+	}
+}
+
+func TestWatcher_RenameDoesNotDropAgent(t *testing.T) {
+	// A file rename (old path removed, new path added) must not drop the
+	// agent, even in the worst-case ordering where the new path registers
+	// before the old path's removal is processed. Driven via direct
+	// reloadFile calls so the ordering is deterministic (no fsnotify timing).
+	dir := t.TempDir()
+	eng := newTestEngineFromReg()
+	w := NewAgentDirWatcher(dir, eng, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	foo := writeAgentYAML(t, dir, "echo", "hi") // dir/echo.yaml, agent name "echo"
+	w.reloadFile(foo)
+	if eng.Registry.Get("echo") == nil {
+		t.Fatal("agent echo should be registered from the initial file")
+	}
+
+	// Rename the file: bar.yaml now holds the "echo" agent; foo is gone.
+	bar := filepath.Join(dir, "bar.yaml")
+	if err := os.Rename(foo, bar); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	w.reloadFile(bar) // new path registers "echo" first...
+	w.reloadFile(foo) // ...then the old path's removal is processed.
+
+	if eng.Registry.Get("echo") == nil {
+		t.Error("agent echo was dropped by a file rename; removeIfUnclaimed should have kept it")
+	}
+}
+
+func TestWatcher_RenamedAgentNameRemovesOld(t *testing.T) {
+	// Editing a file to change metadata.name in place must unregister the old
+	// name and register the new one.
+	dir := t.TempDir()
+	eng := newTestEngineFromReg()
+	w := NewAgentDirWatcher(dir, eng, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	path := filepath.Join(dir, "agent.yaml")
+	write := func(name string) {
+		body := "apiVersion: mockagents/v1\nkind: Agent\nmetadata:\n  name: " + name +
+			"\nspec:\n  protocol: openai-chat-completions\n  behavior:\n    scenarios:\n" +
+			"      - name: default\n        response:\n          content: \"x\"\n"
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+
+	write("old-name")
+	w.reloadFile(path)
+	if eng.Registry.Get("old-name") == nil {
+		t.Fatal("old-name should be registered")
+	}
+
+	write("new-name")
+	w.reloadFile(path)
+	if eng.Registry.Get("new-name") == nil {
+		t.Error("new-name should be registered after the in-file rename")
+	}
+	if eng.Registry.Get("old-name") != nil {
+		t.Error("old-name should have been unregistered after the in-file rename")
+	}
+}
