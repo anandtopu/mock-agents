@@ -49,8 +49,25 @@ func (p *ToolCallProcessor) ProcessToolCalls(
 
 	toolIndex := indexTools(tools)
 	results := make([]ToolCallResult, len(toolCalls))
-	errs := make([]error, len(toolCalls))
 
+	// Fast path: for one or two calls the goroutine + WaitGroup + errs-slice
+	// overhead dominates the pure-CPU processOne work (no I/O is overlapped), so
+	// run inline (PERF-14). Every call is still processed before returning, and
+	// the first fatal error (in index order) is returned — identical semantics to
+	// the concurrent path below.
+	if len(toolCalls) <= 2 {
+		var firstErr error
+		for i, call := range toolCalls {
+			result, err := p.processOne(call, toolIndex)
+			results[i] = result
+			if firstErr == nil && err != nil && !errors.Is(err, ErrParameterValidation) {
+				firstErr = err
+			}
+		}
+		return results, firstErr
+	}
+
+	errs := make([]error, len(toolCalls))
 	var wg sync.WaitGroup
 	for i, call := range toolCalls {
 		wg.Add(1)
