@@ -211,10 +211,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(re.buf.Bytes())
 }
 
+// apiError is the canonical management-API error envelope ({"error": message}).
+// A fixed struct encodes without the map allocation the literal incurred on
+// every 4xx/5xx, which adds up under chaos error storms (PERF-16).
+type apiError struct {
+	Error string `json:"error"`
+}
+
 // writeError writes the canonical management-API error envelope:
 // a flat {"error": message} body with the given status.
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	writeJSON(w, status, apiError{Error: message})
 }
 
 // writeServerError logs an internal error server-side and returns a generic

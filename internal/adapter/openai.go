@@ -324,11 +324,18 @@ func generateID() string {
 	return strconv.FormatUint(rand.Uint64(), 16)
 }
 
+// openAIError is the OpenAI error envelope ({"error":{"type","message"}}). A
+// fixed struct avoids the two nested map allocations the literal incurred on
+// every 4xx/5xx — the hot path under chaos error storms (PERF-16).
+type openAIError struct {
+	Error openAIErrorBody `json:"error"`
+}
+
+type openAIErrorBody struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
 func writeError(w http.ResponseWriter, status int, errType, message string) {
-	writeJSON(w, status, map[string]any{
-		"error": map[string]string{
-			"type":    errType,
-			"message": message,
-		},
-	})
+	writeJSON(w, status, openAIError{Error: openAIErrorBody{Type: errType, Message: message}})
 }
