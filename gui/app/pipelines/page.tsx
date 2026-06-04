@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import { APIError, listPipelines, PipelineSummary } from "@/lib/api";
+import { Icon } from "@/lib/icons";
 
 export default async function PipelinesPage() {
   let pipelines: PipelineSummary[] = [];
@@ -13,11 +14,13 @@ export default async function PipelinesPage() {
 
   return (
     <div>
-      <h1 className="page-title">Pipelines</h1>
-      <p className="page-lede">
-        Multi-agent topologies loaded from <code>kind: Pipeline</code> YAML
-        documents in the agents directory. Click any row to see the DAG.
-      </p>
+      <div className="page-head">
+        <h1 className="page-title">Pipelines</h1>
+        <p className="page-lede">
+          Multi-agent topologies declared with <code>kind: Pipeline</code>. Sequential, parallel,
+          and graph wiring with substring-matched conditional edges. Click one to see its DAG.
+        </p>
+      </div>
 
       {error && (
         <div className="banner banner-error">
@@ -25,38 +28,42 @@ export default async function PipelinesPage() {
         </div>
       )}
 
-      {pipelines.length === 0 && !error ? (
+      {!error && pipelines.length === 0 ? (
         <div className="empty">
-          No pipelines loaded. Drop a <code>kind: Pipeline</code> YAML into
-          your agents directory and restart the server.
+          No pipelines loaded. Drop a <code>kind: Pipeline</code> YAML into your agents directory
+          and restart the server.
         </div>
       ) : (
-        <div className="card-grid">
+        <div className="catalog" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
           {pipelines.map((p) => (
-            <Link
-              key={p.name}
-              href={`/pipelines/${encodeURIComponent(p.name)}`}
-              className="card"
-            >
-              <div className="card-head">
-                <h2>{p.name}</h2>
-                <span className="badge">{p.topology}</span>
-              </div>
-              {p.description && <p className="card-desc">{p.description}</p>}
-              <dl className="stats">
-                <div>
-                  <dt>Agents</dt>
-                  <dd>{p.agent_count}</dd>
-                </div>
-                <div>
-                  <dt>Edges</dt>
-                  <dd>{p.edge_count}</dd>
-                </div>
-              </dl>
-            </Link>
+            <PipelineCard key={p.name} p={p} />
           ))}
         </div>
       )}
     </div>
+  );
+}
+
+function PipelineCard({ p }: { p: PipelineSummary }) {
+  return (
+    <Link href={`/pipelines/${encodeURIComponent(p.name)}`} className="agent-card" style={{ minHeight: 0 }}>
+      <div className="ac-top">
+        <div className="agent-icon">
+          <Icon name="workflow" size={18} />
+        </div>
+        <div className="grow">
+          <h3>{p.name}</h3>
+          <div className="ac-proto">
+            {p.agent_count} agents · {p.edge_count} edges
+          </div>
+        </div>
+        <span className="badge badge-outline">{p.topology}</span>
+      </div>
+      {p.description && (
+        <p className="ac-desc" style={{ flex: "none" }}>
+          {p.description}
+        </p>
+      )}
+    </Link>
   );
 }

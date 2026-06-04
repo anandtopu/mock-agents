@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { getPipeline, PipelineDefinition } from "@/lib/api";
+import { Icon } from "@/lib/icons";
 import { DAGViewer } from "./DAGViewer";
 
 type PageProps = {
@@ -15,36 +16,50 @@ export default async function PipelineDetailPage({ params }: PageProps) {
 
   const agents = pipeline.spec.agents ?? [];
   const edges = normalizeEdges(pipeline);
+  const tags = pipeline.metadata.tags ?? [];
 
   return (
     <div>
-      <div className="breadcrumb">
-        <Link href="/pipelines">Pipelines</Link> · <code>{name}</code>
-      </div>
-      <h1 className="page-title">{name}</h1>
-      {pipeline.metadata.description && (
-        <p className="page-lede">{pipeline.metadata.description}</p>
-      )}
-      <div className="pipeline-meta">
-        <span className="tag">{pipeline.spec.topology}</span>
-        <span>
-          {agents.length} agent{agents.length === 1 ? "" : "s"}
-        </span>
-        {edges.length > 0 && (
-          <span>
-            {edges.length} edge{edges.length === 1 ? "" : "s"}
-          </span>
-        )}
+      <Link href="/pipelines" className="btn btn-ghost btn-sm" style={{ marginLeft: -8, marginBottom: 10 }}>
+        <Icon name="arrow-left" size={15} /> Pipelines
+      </Link>
+
+      <div className="head-row mb-4">
+        <div className="agent-icon" style={{ width: 44, height: 44, flex: "0 0 44px" }}>
+          <Icon name="workflow" size={22} />
+        </div>
+        <div className="grow">
+          <div className="row gap-3" style={{ flexWrap: "wrap" }}>
+            <h1 className="page-title">{name}</h1>
+            <span className="badge badge-outline">{pipeline.spec.topology}</span>
+          </div>
+          <div className="row gap-2 mt-2" style={{ flexWrap: "wrap" }}>
+            <span className="tag">
+              {agents.length} agent{agents.length === 1 ? "" : "s"}
+            </span>
+            {edges.length > 0 && (
+              <span className="tag">
+                {edges.length} edge{edges.length === 1 ? "" : "s"}
+              </span>
+            )}
+            {tags.map((t) => (
+              <span key={t} className="tag">
+                {t}
+              </span>
+            ))}
+          </div>
+          {pipeline.metadata.description && (
+            <p className="page-lede" style={{ marginTop: 10 }}>
+              {pipeline.metadata.description}
+            </p>
+          )}
+        </div>
       </div>
 
-      <DAGViewer
-        topology={pipeline.spec.topology}
-        agents={agents}
-        edges={edges}
-      />
+      <DAGViewer topology={pipeline.spec.topology} agents={agents} edges={edges} />
 
-      <section>
-        <h2 className="section-title">Agents</h2>
+      <h2 className="section-title">Agents</h2>
+      <div className="table-wrap">
         <table className="data-table">
           <thead>
             <tr>
@@ -55,19 +70,15 @@ export default async function PipelineDetailPage({ params }: PageProps) {
           <tbody>
             {agents.map((a) => (
               <tr key={a.id}>
+                <td className="mono">{a.id}</td>
                 <td>
-                  <code>{a.id}</code>
-                </td>
-                <td>
-                  <Link href={`/agents/${encodeURIComponent(a.ref)}`}>
-                    {a.ref}
-                  </Link>
+                  <Link href={`/agents/${encodeURIComponent(a.ref)}`}>{a.ref}</Link>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
-      </section>
+      </div>
     </div>
   );
 }
