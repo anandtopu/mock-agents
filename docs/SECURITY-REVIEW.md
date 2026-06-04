@@ -246,7 +246,16 @@ These were checked and are correct. Re-touching them is a regression:
 
 ## 6. What this review did NOT cover
 
-- Dependency CVE scanning (run `govulncheck` / `nancy` separately).
+- ~~Dependency CVE scanning~~ **— done 2026-06-04.** `govulncheck ./...`
+  initially flagged **11 reachable vulnerabilities, all in the go1.26.1 standard
+  library** (crypto/x509, crypto/tls, html/template, net, net/textproto +
+  golang.org/x/net HTTP/2). Most have low *practical* exposure for the default
+  deployment (plain HTTP, no TLS termination; the engine uses `text/template`,
+  not `html/template`), but the fix is trivial: **`toolchain go1.26.4`** in
+  `go.mod` (clears all 11) + **`golang.org/x/net` v0.52.0→v0.53.0**. Re-scan:
+  **0 reachable vulnerabilities.** Remaining import/module-level findings are
+  unreachable (govulncheck confirms the symbols aren't called) and clear with
+  routine dependency bumps. Re-run periodically — new stdlib CVEs land often.
 - The Next.js GUI (`gui/`) — client-side XSS, cookie flags, CSP were out of
   this Go-focused scope; worth a separate front-end pass (note: the auth cookie
   is documented HttpOnly).
