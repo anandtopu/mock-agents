@@ -2,6 +2,12 @@ module github.com/mockagents/mockagents
 
 go 1.26.1
 
+// Require the patched Go toolchain: go1.26.1's standard library carries the
+// vulnerabilities GO-2026-4865/4866/4870/4918/4946/4947/4971/4980/4982/5037 and
+// the net/textproto fix. All are resolved by building with go1.26.4 (govulncheck
+// clean). Kept as a toolchain bump rather than raising the `go` language floor.
+toolchain go1.26.4
+
 require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/spf13/cobra v1.10.2
@@ -35,7 +41,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect
 	go.opentelemetry.io/otel/metric v1.43.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
-	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260401024825-9d38bb4040a9 // indirect
