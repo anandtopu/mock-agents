@@ -261,12 +261,22 @@ func formatAnthropicResponse(resp *engine.Response, inputTokens, outputTokens in
 	}
 }
 
+// anthropicErrorEnvelope is the Anthropic error shape
+// ({"type":"error","error":{"type","message"}}). Fixed struct, no nested map
+// allocations on the chaos-storm 4xx/5xx path (PERF-16).
+type anthropicErrorEnvelope struct {
+	Type  string             `json:"type"` // always "error"
+	Error anthropicErrorBody `json:"error"`
+}
+
+type anthropicErrorBody struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
 func writeAnthropicError(w http.ResponseWriter, status int, errType, message string) {
-	writeJSON(w, status, map[string]any{
-		"type": "error",
-		"error": map[string]string{
-			"type":    errType,
-			"message": message,
-		},
+	writeJSON(w, status, anthropicErrorEnvelope{
+		Type:  "error",
+		Error: anthropicErrorBody{Type: errType, Message: message},
 	})
 }
