@@ -82,12 +82,119 @@ session state, trustworthy interaction logs, and clean package metadata.
 | AHR-04b | Add CI/race documentation for Windows CGO caveat | AHR-04 | BE-3 | 0.25 | P1 | TODO | AHR-04a | CI retains race coverage on supported runners; local caveat is documented. |
 | AHR-05a | Capture sanitized request body and real protocol/session metadata | AHR-05 | BE-1 | 0.75 | P1 | TODO | AHR-03a | Logs show useful request context without leaking common secrets. |
 | AHR-05b | Record scenario name, tool count, error, and truncation state | AHR-05 | BE-1 | 0.75 | P1 | TODO | AHR-05a | Log detail and costs can be trusted for debugging and dashboarding. |
-| AHR-06a | Add configurable CORS origins and allowed headers | AHR-06 | DX-1 | 0.5 | P1 | TODO | -- | Local dev keeps working; multi-tenant deployments can avoid wildcard origins. |
-| AHR-06b | Set secure GUI auth cookies when deployment URL is HTTPS | AHR-06 | DX-1 | 0.5 | P1 | TODO | -- | Cookie flags are environment-aware and covered by tests or type-safe helpers. |
+| AHR-06a | Add configurable CORS origins and allowed headers | AHR-06 | DX-1 | 0.5 | P1 | DONE | -- | `Config.CORSAllowedOrigins` reflects an explicit allow-list with `Vary: Origin` (empty/`*` keeps wildcard); `internal/server/middleware.go` (F-MW-001). |
+| AHR-06b | Set secure GUI auth cookies when deployment URL is HTTPS | AHR-06 | DX-1 | 0.5 | P1 | DONE | -- | `gui/lib/auth.ts` sets `httpOnly`, `sameSite: "strict"`, and `secure` (gated on `NODE_ENV === "production"`). |
 | AHR-07a | Define adapter route registration interface and migrate OpenAI/Anthropic mounting | AHR-07 | BE-3 | 1.0 | P2 | TODO | AHR-01a | Server registers adapters through a common boundary; behavior unchanged. |
 | AHR-08a | Align package/license metadata and OpenAPI license to Apache 2.0 | AHR-08 | DX-1 | 0.25 | P2 | TODO | -- | README, root LICENSE, PyPI, npm, and OpenAPI metadata agree. |
 | AHR-08b | Expand `.gitignore` and remove generated artifacts from tracking | AHR-08 | DX-1 | 0.5 | P2 | TODO | -- | `.pyc`, `__pycache__`, coverage files, local binaries, egg-info, and DBs are ignored/untracked. |
 | AHR-08c | Add lightweight schema/API/SDK drift check to CI | AHR-08 | DX-1 | 0.75 | P2 | TODO | AHR-08a | CI fails when public API metadata or SDK models drift unintentionally. |
+
+---
+
+## Refinement Pass (2026-06-05)
+
+Backlog grooming after the docs/homelab session. Every open item from
+the Active Hardening Sprint above was re-verified against the current
+tree (the code moved since 2026-05-30, so some rows were stale). AHR-06a
+and AHR-06b are reclassified **DONE**. The remaining open items are
+restated below as ready-to-pull tickets with verified current state and
+sharper acceptance criteria. Ordered by ROI (low-risk hygiene first,
+then correctness, then larger slices).
+
+### Verification summary (what's actually open)
+
+| ID | Was | Verified state (2026-06-05) | Evidence |
+| -- | --- | --------------------------- | -------- |
+| AHR-04b | TODO | **Open** — `.github/workflows/ci.yml:35` runs `go test -race` across the OS matrix incl. Windows, but `-race` is a no-op without cgo on this pure-Go build; no doc explains the caveat or where real race coverage comes from. | `.github/workflows/ci.yml`, `Makefile` |
+| AHR-05 | TODO | **Partial** — SEC-05 body sanitization shipped (`MOCKAGENTS_LOG_BODIES`, `SanitizeBody`). But `InteractionCapture` never populates `RequestBody`, `Protocol`, `ScenarioName`, `ToolCallsCount`, or `Error`, and there is no truncation-status column. `SessionID` is filled from `X-Request-Id`, not a real session id. | `internal/server/log_handlers.go`, `internal/storage/models.go` |
+| AHR-06 | TODO | **Done** — see reclassified rows above. Only residual: `X-Api-Key` absent from the CORS allow-headers list, which is moot (auth is `Authorization: Bearer`). | `internal/server/middleware.go`, `gui/lib/auth.ts` |
+| AHR-07 | TODO | **Open** — OpenAI/Anthropic handlers are still hardwired in `server.go:264-271`; no registration boundary. | `internal/server/server.go` |
+| AHR-08a | TODO | **Partial** — root `LICENSE`, README, and `api-spec.yaml` are Apache-2.0, but `sdk/python/pyproject.toml` and `sdk/typescript/package.json` both declare **MIT**. | `sdk/python/pyproject.toml:10`, `sdk/typescript/package.json:42` |
+| AHR-08b | TODO | **Open** — `.gitignore` lacks `*.pyc`, `__pycache__`, `*.egg-info`, coverage files, `*.db`, and local binaries. | `.gitignore` |
+| AHR-08c | TODO | **Open** — no OpenAPI/SDK drift check in CI. | `.github/workflows/ci.yml` |
+
+### Refined ticket: REF-01 — License metadata alignment (was AHR-08a)
+
+**Priority:** P2 · **Points:** 1 · **Lane:** release hygiene (lowest blast radius — start here)
+
+The SDKs ship the wrong license string. Bring them in line with the
+Apache-2.0 root license.
+
+**Acceptance criteria:**
+- [ ] `sdk/python/pyproject.toml` `license` reads `Apache-2.0` (SPDX expression form, dropping the deprecated `{text = "MIT"}` table).
+- [ ] `sdk/typescript/package.json` `"license"` reads `"Apache-2.0"`.
+- [ ] A short grep/CI assertion (or a note in REF-06) guards against future drift.
+- [ ] `make test-python` and `make test-typescript` stay green.
+
+### Refined ticket: REF-02 — `.gitignore` hygiene (was AHR-08b)
+
+**Priority:** P2 · **Points:** 1 · **Lane:** release hygiene
+
+**Acceptance criteria:**
+- [ ] `.gitignore` ignores `__pycache__/`, `*.pyc`, `*.egg-info/`, `.pytest_cache/`, `coverage.out`, `*.db` / `.mockagents.db`, and the built `mockagents` / `mockagents.exe` binary.
+- [ ] `git ls-files` shows none of the above already tracked (untrack any that are, via `git rm --cached`).
+- [ ] No example/test fixture that legitimately needs a `.db` is accidentally ignored (use a negation if needed).
+
+### Refined ticket: REF-03 — Document the race-detector caveat (was AHR-04b)
+
+**Priority:** P1 · **Points:** 1 · **Lane:** correctness/ops
+
+`go test -race` requires cgo; this build is pure-Go (`modernc.org/sqlite`),
+so `-race` compiles but detects nothing. CI currently implies race coverage
+it does not provide.
+
+**Acceptance criteria:**
+- [ ] Decide and document the policy: either (a) drop `-race` from CI to stop implying false coverage, or (b) add one cgo-enabled race job on Linux only and document why Windows/macos can't.
+- [ ] `CONTRIBUTING.md` (and a Makefile comment near `test-race`) explains the no-cgo constraint and the chosen CI policy.
+- [ ] `.github/workflows/ci.yml` matches the documented policy.
+
+### Refined ticket: REF-04 — Interaction-log fidelity (was AHR-05)
+
+**Priority:** P1 · **Points:** 5 · **Lane:** correctness/observability
+
+The log schema promises fields the capture path never fills, so the
+costs/audit/log-detail surfaces show blanks. SEC-05 sanitization already
+exists — this wires the remaining metadata through.
+
+**Acceptance criteria:**
+- [ ] `InteractionCapture` populates `Protocol`, `ScenarioName`, `ToolCallsCount`, and `Error` from `RequestMeta`/engine result (thread them out of the adapter the way tenant id already is).
+- [ ] `RequestBody` is captured under the existing `MOCKAGENTS_LOG_BODIES` mode (sanitized/none honored), reusing `SanitizeBody`.
+- [ ] A persisted truncation flag records when a captured body was clipped.
+- [ ] `SessionID` reflects a real session id (`X-Session-Id` when supplied) and falls back to request id only when absent.
+- [ ] SQLite schema migrates cleanly on an existing `.mockagents.db` (additive columns, no data loss); storage tests cover the new fields.
+
+### Refined ticket: REF-05 — Adapter registration boundary (was AHR-07)
+
+**Priority:** P2 · **Points:** 5 · **Lane:** architecture (do after REF-04 so route/log behavior is stable)
+
+**Acceptance criteria:**
+- [ ] An `Adapter` interface (name + route registration) replaces the hardwired `mux.HandleFunc` block in `server.go:264-271`.
+- [ ] OpenAI and Anthropic handlers register through that boundary; external wire behavior is byte-identical (conformance suite unchanged and green).
+- [ ] Adding a third provider requires no edits to `server.go` route wiring — only an adapter registration.
+- [ ] Tenant-header / `ProcessRequestContext` plumbing is preserved through the new boundary.
+
+### Refined ticket: REF-06 — API/SDK drift check in CI (was AHR-08c)
+
+**Priority:** P2 · **Points:** 2 · **Lane:** release hygiene (depends on REF-01)
+
+**Acceptance criteria:**
+- [ ] CI step parses `docs/api-spec.yaml` and asserts every `#/components/...` `$ref` resolves (the regex sweep from the 2026-06-04 session, scripted).
+- [ ] CI asserts license strings agree across root `LICENSE`, both SDK manifests, and `api-spec.yaml` (guards REF-01).
+- [ ] The check is fast (<10s), runs on PRs, and fails loudly on drift.
+
+### Larger slices (unchanged, still the two big next bets)
+
+| ID | Title | Priority | Points | Notes |
+| -- | ----- | -------- | ------ | ----- |
+| REF-07 | GUI v0.3 workflow editor (drag-to-rewire `kind: Pipeline`) | P1 | 13 | `DAGViewer.tsx` is explicitly read-only; needs a DAG widget (React Flow) + YAML round-trip + the existing `validateYAML`/`POST /config/validate` plumbing. Largest single item; design first. |
+| REF-08 | SaaS-tier multi-tenancy | P2 | 21 | Postgres tenancy store, SSO/OAuth, per-tenant agent-name collisions, billing/quotas. Needs a design doc before any code. |
+
+### Recommended pull order
+
+1. **One-sitting hygiene batch:** REF-01 → REF-02 (tiny, no-risk, unblock REF-06).
+2. **Correctness lane:** REF-03 (doc) and REF-04 (log fidelity) — REF-04 is the highest-value functional fix.
+3. **Architecture lane:** REF-05 then REF-06.
+4. **Big bets:** REF-07 (design + build) and REF-08 (design only) when product wants to push surface area.
 
 ---
 
