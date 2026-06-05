@@ -13,7 +13,7 @@
 
 import "@xyflow/react/dist/style.css";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   addEdge,
   Background,
@@ -32,16 +32,30 @@ import {
 } from "@xyflow/react";
 
 import { Icon } from "@/lib/icons";
-import type { PipelineDefinition, PipelineEdge } from "@/lib/api";
+import type {
+  PipelineDefinition,
+  PipelineEdge,
+  SavePipelineResult,
+  ValidateResult,
+  ValidationError,
+} from "@/lib/api";
 
 type Topology = "sequential" | "parallel" | "graph";
 
 type AgentData = Record<string, unknown> & { id: string; ref: string };
 type AgentNode = Node<AgentData, "agent">;
 
+type Banner = { kind: "success" | "error" | "conflict"; message: string };
+
 interface PipelineEditorProps {
   pipeline: PipelineDefinition;
   agentNames: string[];
+  /** The pipeline's current version (ETag), sent as If-Match on save. */
+  version: string;
+  /** Server action: validate the serialized definition (debounced). */
+  validateAction: (json: string) => Promise<ValidateResult>;
+  /** Server action: persist the definition with optimistic concurrency. */
+  saveAction: (definition: PipelineDefinition, version: string) => Promise<SavePipelineResult>;
 }
 
 const NODE_X = 230;
@@ -148,7 +162,13 @@ function toFlowEdge(e: PipelineEdge): Edge {
   };
 }
 
-export function PipelineEditor({ pipeline, agentNames }: PipelineEditorProps) {
+export function PipelineEditor({
+  pipeline,
+  agentNames,
+  version: initialVersion,
+  validateAction,
+  saveAction,
+}: PipelineEditorProps) {
   const initialTopology = (["sequential", "parallel", "graph"].includes(pipeline.spec.topology)
     ? pipeline.spec.topology
     : "graph") as Topology;
@@ -283,6 +303,57 @@ export function PipelineEditor({ pipeline, agentNames }: PipelineEditorProps) {
 
   const definitionJSON = useMemo(() => JSON.stringify(definition, null, 2), [definition]);
 
+  // --- Live validation (debounced) + save -------------------------------
+  const [version, setVersion] = useState(initialVersion);
+  const [validating, setValidating] = useState(false);
+  const [errors, setErrors] = useState<ValidationError[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [banner, setBanner] = useState<Banner | null>(null);
+
+  // Re-validate ~400ms after edits settle. The serialized JSON is valid YAML,
+  // so the same /config/validate endpoint the YAML editor uses applies here.
+  useEffect(() => {
+    let cancelled = false;
+    setValidating(true);
+    const handle = window.setTimeout(() => {
+      void validateAction(definitionJSON).then((res) => {
+        if (cancelled) return;
+        setErrors(res.ok ? [] : res.errors);
+        setValidating(false);
+      });
+    }, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [definitionJSON, validateAction]);
+
+  const canSave = !saving && !validating && errors.length === 0;
+
+  const save = useCallback(() => {
+    setSaving(true);
+    setBanner(null);
+    void saveAction(definition, version).then((res) => {
+      setSaving(false);
+      switch (res.status) {
+        case "ok":
+          setVersion(res.version);
+          setErrors([]);
+          setBanner({ kind: "success", message: "Saved to disk." });
+          break;
+        case "invalid":
+          setErrors(res.errors);
+          setBanner({ kind: "error", message: "Validation failed — the file was not written." });
+          break;
+        case "conflict":
+          setBanner({ kind: "conflict", message: res.message });
+          break;
+        default:
+          setBanner({ kind: "error", message: res.message });
+      }
+    });
+  }, [definition, version, saveAction]);
+
   const [copied, setCopied] = useState(false);
   const copyDefinition = useCallback(() => {
     void navigator.clipboard?.writeText(definitionJSON).then(() => {
@@ -292,7 +363,52 @@ export function PipelineEditor({ pipeline, agentNames }: PipelineEditorProps) {
   }, [definitionJSON]);
 
   return (
-    <div className="pe-grid">
+    <div>
+      <div className="pe-actionbar">
+        <button type="button" className="btn btn-primary btn-sm" onClick={save} disabled={!canSave}>
+          <Icon name="check-circle" size={15} /> {saving ? "Saving…" : "Save"}
+        </button>
+        <span className="pe-status">
+          {validating
+            ? "Validating…"
+            : errors.length > 0
+              ? `${errors.length} validation error${errors.length === 1 ? "" : "s"}`
+              : "Valid"}
+        </span>
+      </div>
+
+      {banner && (
+        <div className={`pe-banner pe-banner-${banner.kind}`}>
+          <span>{banner.message}</span>
+          {banner.kind === "conflict" && (
+            <button
+              type="button"
+              className="btn btn-outline btn-xs"
+              onClick={() => window.location.reload()}
+            >
+              <Icon name="refresh-cw" size={13} /> Reload
+            </button>
+          )}
+        </div>
+      )}
+
+      {errors.length > 0 && (
+        <div className="card card-pad pe-errors">
+          <div className="pe-label" style={{ marginBottom: 6 }}>
+            Validation
+          </div>
+          <ul className="pe-error-list">
+            {errors.map((e, i) => (
+              <li key={i}>
+                <span className="mono">{e.field}</span>: {e.message}
+                {e.suggestion && <span className="pe-error-hint"> — {e.suggestion}</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="pe-grid">
       <div className="pe-canvas-col">
         <div className="pe-toolbar card card-pad">
           <label className="field" style={{ margin: 0 }}>
@@ -403,10 +519,10 @@ export function PipelineEditor({ pipeline, agentNames }: PipelineEditorProps) {
           </div>
           <pre className="pe-json">{definitionJSON}</pre>
           <p className="pe-hint" style={{ marginTop: 8 }}>
-            One-click Save (write back to disk) arrives in the next slice. For now, copy this
-            definition.
+            Save writes this definition back to the pipeline&rsquo;s YAML file and reloads it.
           </p>
         </div>
+      </div>
       </div>
     </div>
   );
