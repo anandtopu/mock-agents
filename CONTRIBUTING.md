@@ -21,6 +21,26 @@ make test-all      # All tests
 make lint          # Code quality checks
 ```
 
+### Race detection
+
+The Go race detector needs `CGO_ENABLED=1` **and** a C compiler (gcc/clang).
+MockAgents is otherwise pure-Go on purpose — SQLite is `modernc.org/sqlite`,
+so the normal build and `make test` need no cgo and cross-compile cleanly.
+
+The trade-off: `make test-race` (`go test -race`) only runs where a C
+compiler is present. On a bare Windows dev box without mingw it fails with
+`-race requires cgo`; that is expected, not a bug. Two ways to get race
+coverage:
+
+- **Locally:** install a C toolchain (Linux/macOS already have one; on
+  Windows install mingw-w64), then `make test-race`.
+- **In CI (recommended):** the Go workflow runs `-race` on its Linux and
+  macOS legs, which always have a C toolchain. The Windows leg runs the
+  suite **without** `-race` (it still gates compilation and behavior there);
+  race coverage for the shared, platform-independent code comes from the
+  Linux/macOS legs. Don't add `-race` to the Windows leg — it makes the job
+  depend on whatever C compiler happens to be on the runner image.
+
 ## Project Structure
 
 | Directory | Description |
