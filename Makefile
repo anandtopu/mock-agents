@@ -21,8 +21,13 @@ test:                           ## Run Go tests
 test-verbose:                   ## Run Go tests with verbose output
 	$(GO) test ./... -v -count=1 -timeout 5m
 
-test-race:                      ## Run Go tests with race detector
-	$(GO) test ./... -count=1 -race -timeout 5m
+# The race detector requires CGO_ENABLED=1 and a C compiler (gcc/clang).
+# This codebase is otherwise pure-Go (modernc.org/sqlite, no cgo), so a bare
+# dev box — notably Windows without mingw — cannot run this target and will
+# error with "requires cgo". CI runs it on the Linux and macOS legs, which
+# always have a C toolchain; see CONTRIBUTING.md "Race detection".
+test-race:                      ## Run Go tests with race detector (needs a C compiler)
+	CGO_ENABLED=1 $(GO) test ./... -count=1 -race -timeout 5m
 
 test-coverage:                  ## Run Go tests with coverage report
 	$(GO) test ./... -coverprofile=coverage.out -count=1 -timeout 5m
