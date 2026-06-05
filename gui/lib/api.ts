@@ -470,6 +470,86 @@ export async function getPipeline(name: string): Promise<PipelineDefinition | nu
   }
 }
 
+function stripQuotes(s: string): string {
+  return s.replace(/^"|"$/g, "");
+}
+
+/** Fetch a pipeline together with its version (the ETag), which the editor
+ * echoes back as the `If-Match` precondition when saving. Returns null on 404.
+ * Separate from getPipeline because fetchJSON discards response headers. */
+export async function getPipelineWithVersion(
+  name: string,
+): Promise<{ definition: PipelineDefinition; version: string } | null> {
+  const key = await getAuthKey();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (key) headers.Authorization = `Bearer ${key}`;
+  const res = await fetch(`${baseUrl()}/api/v1/pipelines/${encodeURIComponent(name)}`, {
+    cache: "no-store",
+    headers,
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) {
+    const body = await res.text();
+    throw new APIError(res.status, `/api/v1/pipelines/${name}: ${res.status} ${body.slice(0, 200)}`);
+  }
+  const definition = (await res.json()) as PipelineDefinition;
+  return { definition, version: stripQuotes(res.headers.get("ETag") ?? "") };
+}
+
+export type SavePipelineResult =
+  | { status: "ok"; version: string }
+  | { status: "invalid"; errors: ValidationError[] }
+  | { status: "conflict"; message: string }
+  | { status: "error"; message: string };
+
+/** Persist an edited pipeline via PUT with optimistic concurrency. `version`
+ * is the ETag from getPipelineWithVersion, sent as If-Match. Returns a
+ * discriminated result instead of throwing, so the editor can render each
+ * outcome inline:
+ *   - ok:       written; carries the new version
+ *   - invalid:  422 — validation failed, the file was left untouched
+ *   - conflict: 412/428 — the pipeline changed on disk (or If-Match missing)
+ *   - error:    transport or other failure */
+export async function savePipeline(
+  name: string,
+  definition: PipelineDefinition,
+  version: string,
+): Promise<SavePipelineResult> {
+  const key = await getAuthKey();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "If-Match": version ? `"${version}"` : "",
+  };
+  if (key) headers.Authorization = `Bearer ${key}`;
+  let res: Response;
+  try {
+    res = await fetch(`${baseUrl()}/api/v1/pipelines/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      cache: "no-store",
+      headers,
+      body: JSON.stringify(definition),
+    });
+  } catch (err) {
+    return { status: "error", message: err instanceof Error ? err.message : "network error" };
+  }
+  if (res.status === 200) {
+    return { status: "ok", version: stripQuotes(res.headers.get("ETag") ?? "") };
+  }
+  if (res.status === 422) {
+    const body = (await res.json()) as ValidateResult;
+    return { status: "invalid", errors: body.errors ?? [] };
+  }
+  if (res.status === 409 || res.status === 412 || res.status === 428) {
+    return {
+      status: "conflict",
+      message:
+        "The pipeline changed on disk since you opened it. Reload to get the latest, then re-apply your edits.",
+    };
+  }
+  const text = await res.text();
+  return { status: "error", message: `Server returned ${res.status}: ${text.slice(0, 200)}` };
+}
+
 /** Send a YAML document to the server validator. Returns the full
  * report so the editor can render errors inline. Throws APIError on
  * transport failures — the server always returns 200 for validation

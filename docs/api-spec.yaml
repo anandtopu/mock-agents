@@ -318,11 +318,52 @@ paths:
         - { name: name, in: path, required: true, schema: { type: string } }
       responses:
         "200":
-          description: Pipeline detail including nodes and edges.
+          description: Pipeline detail including nodes and edges. The `ETag` response header carries the version to echo back as `If-Match` on update.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Pipeline" }
         "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      operationId: updatePipeline
+      summary: Update a pipeline (write-back to disk)
+      description: >
+        Validate an edited Pipeline definition and, on success, persist it
+        atomically to its source file and re-register it so the change is live
+        immediately. Requires `editor` in multi-tenant mode. Optimistic
+        concurrency: send the `ETag` from GET as `If-Match`; the write is
+        rejected if the pipeline changed on disk since it was loaded.
+      tags: [Pipelines]
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - name: If-Match
+          in: header
+          required: true
+          description: The `ETag` returned by GET. Required for optimistic concurrency.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Pipeline" }
+      responses:
+        "200":
+          description: Saved. The new version is returned in the `ETag` response header.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Pipeline" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "412":
+          description: The `If-Match` version no longer matches; the pipeline changed on disk. Reload and re-apply.
+        "422":
+          description: The edited definition failed validation; the file was not written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ValidateResult" }
+        "428":
+          description: The `If-Match` header is missing.
 
   /api/v1/config/validate:
     post:

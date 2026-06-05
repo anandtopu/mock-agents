@@ -508,3 +508,19 @@ form.inline select { background: var(--sr-bg); border: 1px solid var(--sr-input)
   line-height: 1.5;
   white-space: pre;
 }
+
+/* Pipeline editor — save action bar, banners, validation errors */
+.pe-actionbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.pe-status { font-size: 12.5px; color: var(--sr-fg-muted); }
+.pe-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; margin-bottom: 12px;
+  border: 1px solid var(--sr-border); border-radius: var(--sr-radius-sm);
+  font-size: 13px;
+}
+.pe-banner-success { background: var(--sr-success-bg); color: var(--sr-success-fg); }
+.pe-banner-error { background: var(--sr-danger-bg); color: var(--sr-danger-fg); }
+.pe-banner-conflict { background: var(--sr-warning-bg); color: var(--sr-warning-fg); }
+.pe-errors { margin-bottom: 12px; }
+.pe-error-list { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.7; }
+.pe-error-hint { color: var(--sr-fg-muted); }
