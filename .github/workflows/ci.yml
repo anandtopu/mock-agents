@@ -31,8 +31,19 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
-      - name: Run tests
+      # The race detector needs CGO_ENABLED=1 + a C compiler. The Linux and
+      # macOS runners always ship one, so they carry race coverage for the
+      # shared, platform-independent code. The Windows leg runs the suite
+      # without -race so the job never depends on whatever C toolchain happens
+      # to be on the runner image (the build itself is pure-Go, no cgo).
+      # See CONTRIBUTING.md "Race detection".
+      - name: Run tests (race detector)
+        if: runner.os != 'Windows'
         run: go test ./... -count=1 -race -timeout 5m
+
+      - name: Run tests (no race — pure-Go, no cgo toolchain assumed)
+        if: runner.os == 'Windows'
+        run: go test ./... -count=1 -timeout 5m
 
       - name: Build binary
         run: go build -o mockagents ./cmd/mockagents/
