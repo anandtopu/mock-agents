@@ -101,9 +101,17 @@ type OpenAIHandler struct {
 	Engine *engine.Engine
 }
 
-// ProtocolOpenAIChat is the wire-protocol label recorded on interaction
-// logs for this endpoint; it matches the agent-spec `protocol` enum value.
-const ProtocolOpenAIChat = "openai-chat-completions"
+// Name identifies this adapter in logs and diagnostics.
+func (h *OpenAIHandler) Name() string { return "openai" }
+
+// Routes returns the OpenAI-compatible routes this adapter serves,
+// mounted by the server through the adapter Registry (REF-05).
+func (h *OpenAIHandler) Routes() []Route {
+	return []Route{
+		{Pattern: "POST /v1/chat/completions", Handler: h.HandleChatCompletions},
+		{Pattern: "GET /v1/models", Handler: h.HandleModels},
+	}
+}
 
 // HandleChatCompletions handles POST /v1/chat/completions.
 func (h *OpenAIHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
