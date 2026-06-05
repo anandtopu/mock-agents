@@ -4,3 +4,29 @@ CLAUDE.md
 
 # Homelab deploy: generated at runtime, may contain the bootstrap admin key
 homelabsetup/.homelab-credentials
+
+# Go build output
+/mockagents
+/mockagents.exe
+
+# Test / coverage artifacts
+coverage.out
+coverage.html
+*.test
+
+# SQLite databases (runtime / test scratch)
+*.db
+*.db-shm
+*.db-wal
+.mockagents.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
