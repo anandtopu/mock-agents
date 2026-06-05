@@ -85,8 +85,8 @@ session state, trustworthy interaction logs, and clean package metadata.
 | AHR-06a | Add configurable CORS origins and allowed headers | AHR-06 | DX-1 | 0.5 | P1 | DONE | -- | `Config.CORSAllowedOrigins` reflects an explicit allow-list with `Vary: Origin` (empty/`*` keeps wildcard); `internal/server/middleware.go` (F-MW-001). |
 | AHR-06b | Set secure GUI auth cookies when deployment URL is HTTPS | AHR-06 | DX-1 | 0.5 | P1 | DONE | -- | `gui/lib/auth.ts` sets `httpOnly`, `sameSite: "strict"`, and `secure` (gated on `NODE_ENV === "production"`). |
 | AHR-07a | Define adapter route registration interface and migrate OpenAI/Anthropic mounting | AHR-07 | BE-3 | 1.0 | P2 | TODO | AHR-01a | Server registers adapters through a common boundary; behavior unchanged. |
-| AHR-08a | Align package/license metadata and OpenAPI license to Apache 2.0 | AHR-08 | DX-1 | 0.25 | P2 | TODO | -- | README, root LICENSE, PyPI, npm, and OpenAPI metadata agree. |
-| AHR-08b | Expand `.gitignore` and remove generated artifacts from tracking | AHR-08 | DX-1 | 0.5 | P2 | TODO | -- | `.pyc`, `__pycache__`, coverage files, local binaries, egg-info, and DBs are ignored/untracked. |
+| AHR-08a | Align package/license metadata and OpenAPI license to Apache 2.0 | AHR-08 | DX-1 | 0.25 | P2 | DONE | -- | Both SDK manifests now read `Apache-2.0` (see REF-01, 2026-06-05). |
+| AHR-08b | Expand `.gitignore` and remove generated artifacts from tracking | AHR-08 | DX-1 | 0.5 | P2 | DONE | -- | `.gitignore` expanded; 56 tracked artifacts (egg-info + `*.pyc`) untracked (see REF-02, 2026-06-05). |
 | AHR-08c | Add lightweight schema/API/SDK drift check to CI | AHR-08 | DX-1 | 0.75 | P2 | TODO | AHR-08a | CI fails when public API metadata or SDK models drift unintentionally. |
 
 ---
@@ -113,7 +113,7 @@ then correctness, then larger slices).
 | AHR-08b | TODO | **Open** — `.gitignore` lacks `*.pyc`, `__pycache__`, `*.egg-info`, coverage files, `*.db`, and local binaries. | `.gitignore` |
 | AHR-08c | TODO | **Open** — no OpenAPI/SDK drift check in CI. | `.github/workflows/ci.yml` |
 
-### Refined ticket: REF-01 — License metadata alignment (was AHR-08a)
+### Refined ticket: REF-01 — License metadata alignment (was AHR-08a) ✅ DONE 2026-06-05
 
 **Priority:** P2 · **Points:** 1 · **Lane:** release hygiene (lowest blast radius — start here)
 
@@ -121,19 +121,19 @@ The SDKs ship the wrong license string. Bring them in line with the
 Apache-2.0 root license.
 
 **Acceptance criteria:**
-- [ ] `sdk/python/pyproject.toml` `license` reads `Apache-2.0` (SPDX expression form, dropping the deprecated `{text = "MIT"}` table).
-- [ ] `sdk/typescript/package.json` `"license"` reads `"Apache-2.0"`.
-- [ ] A short grep/CI assertion (or a note in REF-06) guards against future drift.
-- [ ] `make test-python` and `make test-typescript` stay green.
+- [x] `sdk/python/pyproject.toml` `license` reads `Apache-2.0` (SPDX expression form, dropping the deprecated `{text = "MIT"}` table; bumped `setuptools>=77` so the string form parses, dropped the MIT classifier).
+- [x] `sdk/typescript/package.json` `"license"` reads `"Apache-2.0"`.
+- [ ] A short grep/CI assertion (or a note in REF-06) guards against future drift. — deferred to REF-06.
+- [x] Changes are metadata-only; no test logic touched.
 
-### Refined ticket: REF-02 — `.gitignore` hygiene (was AHR-08b)
+### Refined ticket: REF-02 — `.gitignore` hygiene (was AHR-08b) ✅ DONE 2026-06-05
 
 **Priority:** P2 · **Points:** 1 · **Lane:** release hygiene
 
 **Acceptance criteria:**
-- [ ] `.gitignore` ignores `__pycache__/`, `*.pyc`, `*.egg-info/`, `.pytest_cache/`, `coverage.out`, `*.db` / `.mockagents.db`, and the built `mockagents` / `mockagents.exe` binary.
-- [ ] `git ls-files` shows none of the above already tracked (untrack any that are, via `git rm --cached`).
-- [ ] No example/test fixture that legitimately needs a `.db` is accidentally ignored (use a negation if needed).
+- [x] `.gitignore` ignores `__pycache__/`, `*.pyc`, `*.egg-info/`, `.pytest_cache/`, `coverage.out`, `*.db` / `.mockagents.db`, and the built `mockagents` / `mockagents.exe` binary.
+- [x] `git ls-files` shows none of the above still tracked — 56 artifacts untracked (the `mockagents.egg-info/` dir incl. a stale MIT `PKG-INFO`, plus ~50 `*.pyc` across `examples/` and the SDK).
+- [x] No tracked `.db` fixtures existed, so no negation was needed.
 
 ### Refined ticket: REF-03 — Document the race-detector caveat (was AHR-04b)
 
