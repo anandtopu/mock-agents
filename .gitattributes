@@ -1,3 +1,6 @@
 # Shell scripts must use LF so they run on Linux (CRLF breaks the shebang).
 *.sh text eol=lf
 *.bash text eol=lf
+
+# Git hooks are shell scripts too (extensionless) — force LF.
+hooks/** text eol=lf

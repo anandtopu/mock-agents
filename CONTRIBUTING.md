@@ -12,6 +12,15 @@ make setup
 
 **Requirements:** Go 1.26+, Python 3.10+ (for SDK)
 
+### Branch model & git hooks
+
+Only `main` is published to the public repo — feature branches stay local (or
+on a private remote). `make setup` runs `make hooks`, which points
+`core.hooksPath` at the tracked `hooks/` directory and enables a `pre-push`
+guard that refuses to push any branch other than `main` to `origin`. Pushes to
+other remotes are unaffected; override once with `git push --no-verify`. If you
+skip `make setup`, activate the hook directly with `make hooks`.
+
 ## Running Tests
 
 ```bash

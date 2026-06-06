@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# pre-push: keep the PUBLIC repo single-branch.
+#
+# This repo follows a "local-only branches" model: only `main` is ever public.
+# Feature branches live on developer machines and are never pushed to the public
+# GitHub repo. This hook refuses to push any ref other than `main` to `origin`
+# (or to the public repo's URL), so an accidental `git push` can't leak a
+# feature branch.
+#
+# Pushes to ANY OTHER remote (e.g. a private dev repo) are NOT restricted.
+# To override this guard once, on purpose: `git push --no-verify`.
+#
+# This hook is tracked in the repo under hooks/ and activated by pointing
+# core.hooksPath at it. Run `make hooks` (or `git config core.hooksPath hooks`)
+# once after cloning to enable it.
+
+remote="$1"
+url="$2"
+
+# Only guard the public origin. If this isn't `origin` and the URL isn't the
+# public repo, allow the push untouched (covers private dev remotes).
+if [ "$remote" != "origin" ] && ! printf '%s' "$url" | grep -Eq 'anandtopu/mock-agents(\.git)?$'; then
+  exit 0
+fi
+
+# stdin lines: <local ref> <local sha> <remote ref> <remote sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # A local sha of all-zeroes means a branch DELETION — always allow that
+  # (deleting stale non-main branches from the public repo is the whole point).
+  case "$local_sha" in
+    *[!0]*) : ;;      # has a non-zero char -> a real push, keep checking
+    *)      continue ;;  # all zeroes -> deletion, allow
+  esac
+
+  if [ "$remote_ref" != "refs/heads/main" ]; then
+    echo "" >&2
+    echo "pre-push BLOCKED: refusing to push '$remote_ref' to the public repo." >&2
+    echo "" >&2
+    echo "  Only 'main' may be pushed to origin (anandtopu/mock-agents)." >&2
+    echo "  Feature branches stay local in this repo's branch model." >&2
+    echo "" >&2
+    echo "  To push a feature branch to a PRIVATE remote instead:" >&2
+    echo "      git push <private-remote> $local_ref" >&2
+    echo "  To override this guard once, on purpose:" >&2
+    echo "      git push --no-verify origin ..." >&2
+    echo "" >&2
+    exit 1
+  fi
+done
+
+exit 0

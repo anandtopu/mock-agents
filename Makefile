@@ -3,7 +3,7 @@
        gui-dev gui-build \
        helm-lint helm-template helm-package \
        bench bench-report \
-       release run setup help
+       release run setup hooks help
 
 BINARY    := mockagents
 GO        := go
@@ -100,13 +100,18 @@ release:                        ## Build release binaries with GoReleaser (dry r
 run: build                      ## Build and run with example agents
 	./$(BINARY) start --agents-dir examples --log-level debug
 
-setup:                          ## Install development tools
+setup: hooks                    ## Install development tools + git hooks
 	$(GO) install golang.org/x/tools/cmd/goimports@latest
 	@echo "Go tools installed."
 	@if command -v pip > /dev/null 2>&1; then \
 		cd sdk/python && pip install -e ".[dev]"; \
 		echo "Python SDK installed."; \
 	fi
+
+hooks:                          ## Activate tracked git hooks (core.hooksPath)
+	git config core.hooksPath hooks
+	@chmod +x hooks/* 2>/dev/null || true
+	@echo "Git hooks activated (core.hooksPath=hooks)."
 
 ## Cleanup
 clean:                          ## Remove build artifacts
