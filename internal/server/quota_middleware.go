@@ -3,15 +3,21 @@ package server
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/mockagents/mockagents/internal/engine"
 	"github.com/mockagents/mockagents/internal/quota"
 )
 
 // isQuotaPath reports whether a request path is an LLM endpoint subject to
-// per-tenant quotas. Management/health routes are never quota-limited.
+// per-tenant quotas. Management/health routes are never quota-limited. All three
+// provider surfaces count: OpenAI (/v1/chat/completions), Anthropic
+// (/v1/messages), and Gemini (/v1beta/models/{model}:generateContent and
+// :streamGenerateContent) — otherwise Gemini traffic would bypass the cap.
 func isQuotaPath(path string) bool {
-	return path == "/v1/chat/completions" || path == "/v1/messages"
+	return path == "/v1/chat/completions" ||
+		path == "/v1/messages" ||
+		strings.HasPrefix(path, "/v1beta/models/")
 }
 
 // QuotaEnforce rejects requests that exceed a tenant's request-rate (429) or

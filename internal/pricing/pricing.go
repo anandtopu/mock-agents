@@ -90,6 +90,12 @@ var defaultPrices = []Price{
 	{Model: "claude-3-opus-20240229", PromptPer1KUSD: 0.015, CompletionPer1KUSD: 0.075},
 	{Model: "claude-3-sonnet-20240229", PromptPer1KUSD: 0.003, CompletionPer1KUSD: 0.015},
 	{Model: "claude-3-haiku-20240307", PromptPer1KUSD: 0.00025, CompletionPer1KUSD: 0.00125},
+	// Google Gemini (approximate public list prices, per 1K tokens).
+	{Model: "gemini-2.5-pro", PromptPer1KUSD: 0.00125, CompletionPer1KUSD: 0.010},
+	{Model: "gemini-2.5-flash", PromptPer1KUSD: 0.0003, CompletionPer1KUSD: 0.0025},
+	{Model: "gemini-2.0-flash", PromptPer1KUSD: 0.0001, CompletionPer1KUSD: 0.0004},
+	{Model: "gemini-1.5-pro", PromptPer1KUSD: 0.00125, CompletionPer1KUSD: 0.005},
+	{Model: "gemini-1.5-flash", PromptPer1KUSD: 0.000075, CompletionPer1KUSD: 0.0003},
 }
 
 // Lookup returns the price for a model name. The match is

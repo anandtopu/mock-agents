@@ -42,6 +42,10 @@ func TestDefaultTableHasCommonModels(t *testing.T) {
 	for _, model := range []string{
 		"gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet-latest",
 		"claude-3-haiku-20240307",
+		// Google Gemini — MockAgents serves the Gemini surface, so the price
+		// table must price it too (else /costs reads zero for Gemini traffic).
+		"gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash",
+		"gemini-1.5-pro", "gemini-2.5-pro",
 	} {
 		if _, ok := tbl.Lookup(model); !ok {
 			t.Errorf("missing default price for %q", model)
@@ -185,6 +189,21 @@ func TestExtractUsageAnthropic(t *testing.T) {
 	}
 	if u.Model != "claude-3-5-sonnet-20241022" {
 		t.Errorf("model = %q", u.Model)
+	}
+}
+
+func TestExtractUsageGemini(t *testing.T) {
+	body := []byte(`{
+		"candidates": [{"content": {"role": "model", "parts": [{"text": "hi"}]}, "finishReason": "STOP"}],
+		"usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 23, "totalTokenCount": 34},
+		"modelVersion": "gemini-2.0-flash"
+	}`)
+	u := ExtractUsage(body)
+	if u.PromptTokens != 11 || u.CompletionTokens != 23 {
+		t.Errorf("unexpected usage: %+v", u)
+	}
+	if u.Model != "gemini-2.0-flash" {
+		t.Errorf("model = %q (expected gemini-2.0-flash from modelVersion)", u.Model)
 	}
 }
 
