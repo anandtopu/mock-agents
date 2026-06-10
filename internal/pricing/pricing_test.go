@@ -207,6 +207,23 @@ func TestExtractUsageGemini(t *testing.T) {
 	}
 }
 
+func TestExtractUsageGeminiStreamArray(t *testing.T) {
+	// Non-SSE streamGenerateContent returns a JSON ARRAY of responses; usage is
+	// on the (last) element. ExtractUsage must unwrap it, not return 0.
+	body := []byte(`[
+		{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}]},
+		{"candidates":[{"content":{"role":"model","parts":[{"text":" there"}]},"finishReason":"STOP"}],
+		 "usageMetadata":{"promptTokenCount":9,"candidatesTokenCount":4},"modelVersion":"gemini-1.5-flash"}
+	]`)
+	u := ExtractUsage(body)
+	if u.PromptTokens != 9 || u.CompletionTokens != 4 {
+		t.Errorf("unexpected usage from stream array: %+v", u)
+	}
+	if u.Model != "gemini-1.5-flash" {
+		t.Errorf("model = %q (expected gemini-1.5-flash)", u.Model)
+	}
+}
+
 func TestExtractUsageEmptyAndInvalid(t *testing.T) {
 	if u := ExtractUsage(nil); u.Total() != 0 {
 		t.Errorf("nil body should return zero Usage, got %+v", u)

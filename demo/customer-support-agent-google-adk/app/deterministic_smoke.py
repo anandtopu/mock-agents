@@ -55,7 +55,8 @@ def main() -> int:
     parts1 = r1.json()["candidates"][0]["content"]["parts"]
     fc = next((p["functionCall"] for p in parts1 if "functionCall" in p), None)
     print(f"turn 1: functionCall={fc['name'] if fc else None} args={fc.get('args') if fc else None}")
-    assert fc and fc["name"] == "lookup_order", "expected a lookup_order functionCall on turn 1"
+    if not (fc and fc["name"] == "lookup_order"):
+        raise AssertionError("expected a lookup_order functionCall on turn 1")
 
     # --- Turn 2: send the functionResponse back, expect a final STOP answer.
     body2 = {
@@ -75,8 +76,10 @@ def main() -> int:
     text = "".join(p.get("text", "") for p in cand2["content"]["parts"])
     print(f"turn 2: finishReason={cand2['finishReason']}")
     print(f"        answer={text}")
-    assert cand2["finishReason"] == "STOP", "expected a final STOP answer on turn 2"
-    assert text, "expected a non-empty answer on turn 2"
+    if cand2["finishReason"] != "STOP":
+        raise AssertionError("expected a final STOP answer on turn 2")
+    if not text:
+        raise AssertionError("expected a non-empty answer on turn 2")
 
     print("\nSMOKE PASSED ✅")
     return 0

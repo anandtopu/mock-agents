@@ -45,7 +45,8 @@ def main() -> int:
     # --- Turn 1: expect a tool_use.
     r1 = client.messages.create(model=MODEL, max_tokens=256, messages=messages, tools=TOOLS)
     print(f"turn 1: stop_reason={r1.stop_reason}")
-    assert r1.stop_reason == "tool_use", "expected a tool_use on turn 1"
+    if r1.stop_reason != "tool_use":
+        raise AssertionError("expected a tool_use on turn 1")
     tool_use = next(b for b in r1.content if b.type == "tool_use")
     print(f"        tool={tool_use.name} input={tool_use.input}")
 
@@ -67,7 +68,8 @@ def main() -> int:
     # --- Turn 2: expect the final answer.
     r2 = client.messages.create(model=MODEL, max_tokens=256, messages=messages, tools=TOOLS)
     print(f"turn 2: stop_reason={r2.stop_reason}")
-    assert r2.stop_reason == "end_turn", "expected a final answer on turn 2"
+    if r2.stop_reason != "end_turn":
+        raise AssertionError("expected a final answer on turn 2")
     text = "".join(b.text for b in r2.content if b.type == "text")
     print(f"        answer={text}")
 

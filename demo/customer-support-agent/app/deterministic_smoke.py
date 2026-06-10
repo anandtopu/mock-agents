@@ -41,10 +41,12 @@ def main() -> int:
     )
     choice1 = r1.choices[0]
     print(f"turn 1: finish_reason={choice1.finish_reason}")
-    assert choice1.finish_reason == "tool_calls", "expected a tool call on turn 1"
+    if choice1.finish_reason != "tool_calls":
+        raise AssertionError("expected a tool call on turn 1")
     tool_call = choice1.message.tool_calls[0]
     print(f"        tool={tool_call.function.name} args={tool_call.function.arguments}")
-    assert tool_call.function.name == "lookup_order"
+    if tool_call.function.name != "lookup_order":
+        raise AssertionError("expected the lookup_order tool call")
 
     # Execute the "tool" locally and feed the result back, same session.
     tool_result = json.dumps({"status": "shipped", "tracking": "1Z999AA10123456784"})
@@ -59,7 +61,8 @@ def main() -> int:
     )
     choice2 = r2.choices[0]
     print(f"turn 2: finish_reason={choice2.finish_reason}")
-    assert choice2.finish_reason == "stop", "expected a final answer on turn 2"
+    if choice2.finish_reason != "stop":
+        raise AssertionError("expected a final answer on turn 2")
     print(f"        answer={choice2.message.content}")
 
     print("\nSMOKE PASSED ✅")

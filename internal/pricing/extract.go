@@ -1,6 +1,7 @@
 package pricing
 
 import (
+	"bytes"
 	"encoding/json"
 )
 
@@ -28,6 +29,22 @@ func (u Usage) Total() int { return u.PromptTokens + u.CompletionTokens }
 // tool-only) responses is expected.
 func ExtractUsage(body []byte) Usage {
 	if len(body) == 0 {
+		return Usage{}
+	}
+	// A non-SSE Gemini streamGenerateContent response is a JSON *array* of
+	// GenerateContentResponse objects; the usage + model live on (the last)
+	// element. Unwrap and probe the last element that carries usage so the
+	// streamed form is priced too, not just the single-object form.
+	if trimmed := bytes.TrimLeft(body, " \t\r\n"); len(trimmed) > 0 && trimmed[0] == '[' {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(trimmed, &arr); err != nil {
+			return Usage{}
+		}
+		for i := len(arr) - 1; i >= 0; i-- {
+			if u := ExtractUsage(arr[i]); u.Total() > 0 || u.Model != "" {
+				return u
+			}
+		}
 		return Usage{}
 	}
 	var probe struct {

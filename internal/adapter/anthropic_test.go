@@ -288,7 +288,18 @@ func TestAnthropic_ToolResultArrayContent(t *testing.T) {
 
 	// Must be 200 — not 400 "empty user message" (which is what an unflattened
 	// array tool_result would produce).
-	assert.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusOK, rec.Code)
+	// Stronger than status alone: prove the flattened tool_result text actually
+	// reached scenario matching. "RESULT ok" matches none of testAnthropicAgent's
+	// keyword scenarios, so it must fall through to the default response — a
+	// non-empty assistant message, confirming the content flowed through (a
+	// regression that flattened to "" would 400; one that flattened to "search"
+	// would emit a tool_use instead).
+	var resp AnthropicResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotEmpty(t, resp.Content)
+	assert.Equal(t, "How may I assist?", resp.Content[0].Text)
+	assert.Equal(t, "end_turn", resp.StopReason)
 }
 
 // TestExtractAnthropicContent_ToolResultArray unit-tests the flattening helper
