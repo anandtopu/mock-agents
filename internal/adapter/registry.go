@@ -56,14 +56,27 @@ func (r *Registry) Adapters() []Adapter {
 func DefaultRegistry(eng *engine.Engine) *Registry {
 	oai := &OpenAIHandler{Engine: eng}
 	emb := &EmbeddingsHandler{}
+	resp := NewResponsesHandler(eng)
+	// Files + Batch share one in-memory file store: a client uploads a request
+	// JSONL via /v1/files, the batch processor reads it and writes its
+	// output/error files back through the same store (A-08).
+	files := newFileStore()
+	batches := NewBatchesHandler(files, map[string]http.HandlerFunc{
+		"/v1/chat/completions": oai.HandleChatCompletions,
+		"/v1/embeddings":       emb.HandleEmbeddings,
+		"/v1/responses":        resp.HandleResponses,
+	})
 	return NewRegistry(
 		oai,
-		NewResponsesHandler(eng),
+		resp,
 		emb,
 		&ModerationsHandler{},
 		&AnthropicHandler{Engine: eng},
 		&GeminiHandler{Engine: eng},
 		// Azure OpenAI URL surface, delegating to the OpenAI handlers above.
 		&AzureHandler{Chat: oai, Embeddings: emb},
+		// OpenAI Files + Batch API (A-08).
+		NewFilesHandler(files),
+		batches,
 	)
 }

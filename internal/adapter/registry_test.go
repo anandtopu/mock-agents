@@ -28,7 +28,7 @@ func TestDefaultRegistry(t *testing.T) {
 	for _, a := range reg.Adapters() {
 		names = append(names, a.Name())
 	}
-	assert.Equal(t, []string{"openai", "openai-responses", "openai-embeddings", "openai-moderations", "anthropic", "gemini", "azure-openai"}, names, "default adapters mount in order")
+	assert.Equal(t, []string{"openai", "openai-responses", "openai-embeddings", "openai-moderations", "anthropic", "gemini", "azure-openai", "openai-files", "openai-batches"}, names, "default adapters mount in order")
 
 	got := routePatterns(reg)
 	for _, want := range []string{
@@ -43,6 +43,14 @@ func TestDefaultRegistry(t *testing.T) {
 		"POST /openai/deployments/{deployment}/embeddings",
 		"POST /openai/v1/chat/completions",
 		"POST /openai/v1/embeddings",
+		"POST /v1/files",
+		"GET /v1/files/{id}",
+		"GET /v1/files/{id}/content",
+		"DELETE /v1/files/{id}",
+		"POST /v1/batches",
+		"GET /v1/batches",
+		"GET /v1/batches/{id}",
+		"POST /v1/batches/{id}/cancel",
 	} {
 		assert.Truef(t, got[want], "default registry should serve %q", want)
 	}
