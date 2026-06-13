@@ -11,6 +11,21 @@ internal **v0.1 → v0.2 → v0.3** development milestones. All three are on `ma
 ## [Unreleased]
 
 ### Added
+- **Cassette redaction** (R-03) — `mockagents record` gains `--redact` and
+  `--redact-pattern <regexp>` (repeatable; implies `--redact`) so secrets are
+  masked **before** the interaction is written to the cassette, making recorded
+  traffic safer to commit. Default masking covers common provider formats
+  (`sk-*`, `key-*`, `Bearer` tokens, AWS `AKIA…`, GitHub `ghp_/github_pat_…`,
+  Slack `xox[baprs]-…`, Google/Gemini `AIza…`, and JWTs); `--redact-pattern`
+  adds caller-supplied regexps. Redaction is **structure-preserving** — it walks
+  the JSON and rewrites string *values* only, so a pattern can never break the
+  cassette's framing, rename a key, or corrupt an SSE frame, and large integers
+  (token ids, timestamps) survive the round-trip exactly. The request **hash is
+  computed from the original body before redaction**, so replay still matches an
+  un-redacted request; the live response forwarded to the client is never
+  touched. Coverage is best-effort — review a cassette before committing.
+  (`internal/recording/redact.go`; `storage.SanitizeBody` now masks every
+  occurrence and is idempotent.)
 - **Sequenced cassette playback** (R-04) — when a cassette holds multiple
   interactions recorded for the same request hash, replay now serves them **in
   order** (the Nth identical request gets the Nth recorded response), repeating

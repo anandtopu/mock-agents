@@ -30,6 +30,28 @@ python run_checkout_flow.py
 Cassettes are JSON-lines — safe to `git diff`, review, and check in. SSE
 (streaming) responses are captured and replayed faithfully.
 
+### Redact secrets before they hit the cassette
+
+Your `--api-key` is never written, but request/response **bodies** can still
+carry tokens (an `Authorization` echoed in an error, a secret in your prompt).
+Add `--redact` to mask common secret formats — `sk-*`, `key-*`, `Bearer`
+tokens, AWS `AKIA…`, GitHub `ghp_/github_pat_…`, Slack `xox…`, Google `AIza…`,
+and JWTs — before each interaction is stored:
+
+```bash
+mockagents record \
+  --upstream https://api.openai.com \
+  --cassette fixtures/checkout-flow.jsonl \
+  --api-key "$OPENAI_API_KEY" \
+  --redact \
+  --redact-pattern 'cust_[0-9]+'        # repeatable; add your own formats
+```
+
+Redaction is **structure-preserving** — it rewrites JSON string *values* only,
+so a pattern can never break the cassette's framing, rename a key, or corrupt an
+SSE frame, and replay still matches because the request hash is taken from the
+original body. Coverage is best-effort: review a cassette before committing it.
+
 ## 2. Replay
 
 Serve the cassette with no upstream, no key, no network — same requests get the

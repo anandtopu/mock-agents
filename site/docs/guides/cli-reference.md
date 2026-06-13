@@ -241,6 +241,12 @@ mockagents replay --cassette fixtures/gpt4o.jsonl
 Provider keys stay on your machine — they are never written to the cassette.
 SSE streams are captured and replayed.
 
+Add `--redact` to mask common secret formats (`sk-*`, `key-*`, `Bearer`, AWS,
+GitHub, Slack, Google keys, JWTs) inside recorded **bodies** before they are
+written, and `--redact-pattern <regexp>` (repeatable; implies `--redact`) for
+your own formats. Redaction rewrites JSON string values only, so it never breaks
+the cassette or replay matching — see the [record/replay guide](record-replay.md).
+
 ---
 
 ## `mockagents mcp`

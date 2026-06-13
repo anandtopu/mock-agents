@@ -38,6 +38,10 @@ type Proxy struct {
 	// header with "Bearer <key>" on forwarded requests. Useful for routing
 	// recordings through a dedicated budget key.
 	UpstreamAPIKey string
+	// Redactor, when non-nil, masks secrets in each recorded interaction before
+	// it is appended to the cassette (R-03). It never touches the response
+	// forwarded to the client.
+	Redactor *Redactor
 }
 
 // isSSE reports whether a Content-Type value indicates a Server-Sent
@@ -122,6 +126,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ResponseHeaders: CaptureHeaders(upstreamResp.Header, DefaultCaptureHeaders),
 		ResponseBody:    respBody,
 	}
+	// Compute the hash from the ORIGINAL request body before any redaction, so
+	// replay (which sees the un-redacted request) still matches (R-03).
+	it.Hash = HashRequest(it.Method, it.Path, it.RequestBody)
+	if p.Redactor != nil {
+		p.Redactor.Apply(it)
+	}
 	if err := p.Cassette.Append(it); err != nil {
 		// Log via http.Error would overwrite headers; write the response
 		// first and surface the cassette error as a trailing header.
@@ -193,6 +203,10 @@ func (p *Proxy) serveStreaming(w http.ResponseWriter, r *http.Request, reqBody [
 		ResponseHeaders: CaptureHeaders(upstreamResp.Header, DefaultCaptureHeaders),
 		Streaming:       true,
 		StreamEvents:    events,
+	}
+	it.Hash = HashRequest(it.Method, it.Path, it.RequestBody)
+	if p.Redactor != nil {
+		p.Redactor.Apply(it)
 	}
 	if err := p.Cassette.Append(it); err != nil {
 		w.Header().Set("X-Mockagents-Record-Error", err.Error())

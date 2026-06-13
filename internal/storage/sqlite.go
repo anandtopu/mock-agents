@@ -371,17 +371,39 @@ func TruncateBody(body string, maxLen int) string {
 	return body[:maxLen] + "..."
 }
 
-// SanitizeBody removes sensitive fields from request bodies before logging.
+// SanitizeBody masks common API-key patterns (sk-*, key-*, Bearer tokens) in a
+// body, replacing every occurrence's value with "***". It is idempotent:
+// SanitizeBody(SanitizeBody(x)) == SanitizeBody(x). Used for log sanitization
+// and cassette redaction (R-03).
 func SanitizeBody(body string) string {
-	// Replace common API key patterns.
 	sanitized := body
 	for _, pattern := range []string{"sk-", "key-", "Bearer "} {
-		if idx := strings.Index(sanitized, pattern); idx >= 0 {
-			end := idx + len(pattern)
+		offset := 0
+		for {
+			idx := strings.Index(sanitized[offset:], pattern)
+			if idx < 0 {
+				break
+			}
+			valStart := offset + idx + len(pattern)
+			// Idempotent: skip an occurrence that is ALREADY fully masked — the
+			// prefix is followed by "***" and then a value delimiter (or end of
+			// string). This keeps SanitizeBody(SanitizeBody(x)) == SanitizeBody(x)
+			// without mistaking a real secret like "sk-***moresecret" (where more
+			// non-delimiter bytes follow the stars) for an already-masked token,
+			// which would otherwise leave "moresecret" in the clear.
+			if strings.HasPrefix(sanitized[valStart:], "***") {
+				after := valStart + 3
+				if after >= len(sanitized) || sanitized[after] == '"' || sanitized[after] == ' ' || sanitized[after] == ',' {
+					offset = after
+					continue
+				}
+			}
+			end := valStart
 			for end < len(sanitized) && sanitized[end] != '"' && sanitized[end] != ' ' && sanitized[end] != ',' {
 				end++
 			}
-			sanitized = sanitized[:idx+len(pattern)] + "***" + sanitized[end:]
+			sanitized = sanitized[:valStart] + "***" + sanitized[end:]
+			offset = valStart + 3 // advance past the inserted "***"
 		}
 	}
 	return sanitized

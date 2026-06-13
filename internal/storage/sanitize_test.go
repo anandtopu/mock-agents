@@ -1,0 +1,58 @@
+package storage
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestSanitizeBody_MultipleKeys(t *testing.T) {
+	out := SanitizeBody(`{"a":"sk-aaa111","b":"sk-bbb222"}`)
+	assert.NotContains(t, out, "aaa111", "first key must be masked")
+	assert.NotContains(t, out, "bbb222", "second key must also be masked")
+	assert.Equal(t, 2, strings.Count(out, "sk-***"))
+}
+
+func TestSanitizeBody_MultiplePatterns(t *testing.T) {
+	out := SanitizeBody(`{"auth":"Bearer tok999","key":"sk-abc"}`)
+	assert.NotContains(t, out, "tok999")
+	assert.NotContains(t, out, "abc")
+	assert.Contains(t, out, "Bearer ***")
+	assert.Contains(t, out, "sk-***")
+}
+
+func TestSanitizeBody_Idempotent(t *testing.T) {
+	for _, in := range []string{
+		`{"a":"sk-aaa","b":"sk-bbb"}`,
+		`Authorization: Bearer sk-real-key`,
+		`{"a":"sk-***","b":"sk-real"}`, // already-masked + a fresh key
+		`{"model":"gpt-4o"}`,
+	} {
+		once := SanitizeBody(in)
+		twice := SanitizeBody(once)
+		assert.Equalf(t, once, twice, "SanitizeBody not idempotent for %q", in)
+	}
+}
+
+func TestSanitizeBody_AnthropicKey(t *testing.T) {
+	// sk-ant- keys are caught by the sk- prefix.
+	out := SanitizeBody(`{"key":"sk-ant-api03-secretvalue"}`)
+	assert.NotContains(t, out, "secretvalue")
+	assert.Contains(t, out, "sk-***")
+}
+
+func TestSanitizeBody_AlreadyMaskedUnchanged(t *testing.T) {
+	in := `{"key":"sk-***"}`
+	assert.Equal(t, in, SanitizeBody(in))
+}
+
+func TestSanitizeBody_TrailingSecretAfterStars(t *testing.T) {
+	// A real secret whose value happens to start with "***" must NOT be treated
+	// as already-masked — the bytes after the stars must still be scrubbed.
+	out := SanitizeBody(`{"key":"sk-***moresecret"}`)
+	assert.NotContains(t, out, "moresecret")
+	assert.Contains(t, out, "sk-***")
+	// And the fix stays idempotent.
+	assert.Equal(t, out, SanitizeBody(out))
+}

@@ -29,10 +29,12 @@ captured to the cassette, then replayed in order by "mockagents replay".`,
 }
 
 var (
-	recordUpstream string
-	recordCassette string
-	recordPort     int
-	recordAPIKey   string
+	recordUpstream       string
+	recordCassette       string
+	recordPort           int
+	recordAPIKey         string
+	recordRedact         bool
+	recordRedactPatterns []string
 )
 
 func init() {
@@ -40,6 +42,8 @@ func init() {
 	recordCmd.Flags().StringVar(&recordCassette, "cassette", "cassette.jsonl", "Path to the cassette file to write")
 	recordCmd.Flags().IntVarP(&recordPort, "port", "p", 8080, "Port to listen on")
 	recordCmd.Flags().StringVar(&recordAPIKey, "api-key", "", "API key to forward to upstream (overrides client Authorization header)")
+	recordCmd.Flags().BoolVar(&recordRedact, "redact", false, "Mask common secret formats (sk-*, key-*, Bearer, AWS/GitHub/Slack/Google keys, JWTs) in recorded cassette bodies before they are written. Best-effort: review the cassette before committing")
+	recordCmd.Flags().StringArrayVar(&recordRedactPatterns, "redact-pattern", nil, "Additional regexp to mask in recorded bodies (repeatable; implies --redact). Applied to JSON string values only, so a pattern can never break the cassette's structure")
 	rootCmd.AddCommand(recordCmd)
 }
 
@@ -57,6 +61,15 @@ func runRecord(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("building proxy: %w", err)
 	}
 	proxy.UpstreamAPIKey = recordAPIKey
+
+	if recordRedact || len(recordRedactPatterns) > 0 {
+		rd, err := recording.NewRedactor(recordRedactPatterns)
+		if err != nil {
+			return fmt.Errorf("compiling redact patterns: %w", err)
+		}
+		proxy.Redactor = rd
+		fmt.Println("redaction enabled: API keys + custom patterns will be masked in the cassette")
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/chat/completions", proxy)
