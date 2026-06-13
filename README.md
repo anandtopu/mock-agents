@@ -69,6 +69,12 @@ mockagents start                              # prints your base URL + a ready-t
 - **Moderations** (`/v1/moderations`) — deterministic omni-moderation responses
   (`flagged` + 13 category scores) for testing guardrail pipelines offline:
   known-harmful phrases flag the right category, benign text stays clean.
+- **Files + Batch API** (`/v1/files`, `/v1/batches`) — run the full OpenAI batch
+  flow offline: upload a request JSONL, create a batch over
+  `/v1/chat/completions`, `/v1/embeddings`, or `/v1/responses`, poll it to
+  `completed`, and download the `output_file`. Each line is replayed through the
+  live endpoint (so a batched response matches the synchronous one); a
+  configurable processing delay lets a poll loop observe `in_progress`.
 - **Azure OpenAI URLs** — point an `AzureOpenAI()` client at the mock unchanged:
   the `/openai/deployments/{deployment}/…` and `/openai/v1/…` surfaces route to
   the OpenAI handlers (deployment name → model; `api-version` ignored).

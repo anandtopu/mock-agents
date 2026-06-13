@@ -11,6 +11,32 @@ internal **v0.1 → v0.2 → v0.3** development milestones. All three are on `ma
 ## [Unreleased]
 
 ### Added
+- **OpenAI Files + Batch API** (A-08) — the asynchronous, file-driven sibling of
+  the per-request endpoints, so a client can run the full
+  upload → create → poll → download flow against the mock:
+  - **Files API** — `POST /v1/files` (multipart upload with a `purpose`),
+    `GET /v1/files` (with the `purpose` filter), `GET /v1/files/{id}`,
+    `GET /v1/files/{id}/content` (raw bytes), and `DELETE /v1/files/{id}`. An
+    in-memory, per-tenant store (bounded FIFO) backs both the uploaded request
+    JSONL and the batch-generated output/error files.
+  - **Batch API** — `POST /v1/batches`, `GET /v1/batches`, `GET /v1/batches/{id}`,
+    and `POST /v1/batches/{id}/cancel`. The input file is processed **eagerly and
+    deterministically** at create time: each JSONL line
+    (`{custom_id, method, url, body}`) is replayed through the **live** endpoint
+    handler it names, so a batched request is byte-for-byte the same as the
+    synchronous one. Supported endpoints: `/v1/chat/completions`,
+    `/v1/embeddings`, `/v1/responses`.
+  - Dispatched results are written to an `output_file` (one JSONL line per
+    request, with the sub-response's `status_code` and `body`); lines that can't
+    be dispatched at all (malformed JSON, missing/duplicate `custom_id`, an
+    endpoint that doesn't match the batch) go to an `error_file`, and the
+    `request_counts` (`total`/`completed`/`failed`) tally both.
+  - **Simulated lifecycle** — status is derived from elapsed time on every read
+    (no background goroutine): batches complete immediately by default, or stay
+    `in_progress` until an optional `X-Mockagents-Batch-Delay-Ms` header elapses,
+    so a poll loop can observe the non-terminal state. `cancel` works while a
+    batch is in flight. Streaming is forced off on batched requests (the real
+    Batch API rejects it; an SSE body would also break the JSONL framing).
 - **Per-framework "Testing with MockAgents" guide** (DOC-01) — a new
   [Testing with Agent Frameworks](site/docs/guides/framework-testing.md) guide
   with copy-pasteable, demo-grounded recipes for the agent frameworks that have
