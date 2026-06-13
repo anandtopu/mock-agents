@@ -11,6 +11,14 @@ internal **v0.1 → v0.2 → v0.3** development milestones. All three are on `ma
 ## [Unreleased]
 
 ### Added
+- **Sequenced cassette playback** (R-04) — when a cassette holds multiple
+  interactions recorded for the same request hash, replay now serves them **in
+  order** (the Nth identical request gets the Nth recorded response), repeating
+  the last response once the sequence is exhausted. This makes a multi-turn
+  agentic loop — which sends the same request shape each turn — replay the
+  correct per-turn response. Single-interaction cassettes are unchanged; the
+  on-disk format is unchanged. (`Cassette.LookupSequence` + a per-hash cursor on
+  the `Replay` handler.)
 - **Vision input parsing** (A-05) — the OpenAI Chat Completions and Anthropic
   Messages adapters now recognize image content parts (OpenAI `image_url`,
   including `data:` URLs; Anthropic `{type:image, source: base64|url}`). The

@@ -2,9 +2,11 @@ package recording
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -21,11 +23,44 @@ type Replay struct {
 	// off so CI suites get deterministic fast replays; set to true
 	// for demos where realistic pacing matters.
 	PreserveStreamDelays bool
+
+	// cursor tracks the per-hash replay position so a multi-turn loop that
+	// repeats the same request gets the recorded interactions in sequence
+	// (R-04). Past the end of a sequence the last interaction repeats. Guarded
+	// by mu. One Replay instance serves all requests, so the cursor persists
+	// across the loop.
+	mu     sync.Mutex
+	cursor map[string]int
 }
 
 // NewReplay builds a Replay handler.
 func NewReplay(c *Cassette) *Replay {
-	return &Replay{Cassette: c}
+	return &Replay{Cassette: c, cursor: make(map[string]int)}
+}
+
+// next returns the interaction to serve for this request hash, advancing the
+// per-hash cursor. The Nth identical request returns the Nth recorded
+// interaction; requests past the end repeat the last one. Returns nil when the
+// hash has no recorded interactions.
+func (rp *Replay) next(hash string) *Interaction {
+	seq := rp.Cassette.LookupSequence(hash)
+	if len(seq) == 0 {
+		return nil
+	}
+	rp.mu.Lock()
+	if rp.cursor == nil {
+		// Tolerate a directly-constructed Replay{Cassette: c} (zero-value
+		// usable, like before R-04 added the cursor).
+		rp.cursor = make(map[string]int)
+	}
+	idx := rp.cursor[hash]
+	if idx >= len(seq) {
+		idx = len(seq) - 1 // repeat-last
+	} else {
+		rp.cursor[hash] = idx + 1
+	}
+	rp.mu.Unlock()
+	return seq[idx]
 }
 
 // ServeHTTP looks up the incoming request in the cassette and, on a hit,
@@ -38,7 +73,7 @@ func (rp *Replay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hash := HashRequest(r.Method, r.URL.Path, body)
-	it := rp.Cassette.Lookup(hash)
+	it := rp.next(hash)
 	if it == nil {
 		if rp.Fallback != nil {
 			// Reset the body so the fallback can read it.
@@ -55,7 +90,7 @@ func (rp *Replay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Streaming hit: replay captured SSE chunks in order, optionally
 	// honoring the original inter-chunk delays.
 	if it.Streaming {
-		rp.serveStreaming(w, it)
+		rp.serveStreaming(r.Context(), w, it)
 		return
 	}
 
@@ -74,7 +109,7 @@ func (rp *Replay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serveStreaming writes a captured SSE interaction back to the client,
 // flushing after every chunk so downstream consumers see the same
 // incremental arrivals they would from a real LLM server.
-func (rp *Replay) serveStreaming(w http.ResponseWriter, it *Interaction) {
+func (rp *Replay) serveStreaming(ctx context.Context, w http.ResponseWriter, it *Interaction) {
 	for k, v := range it.ResponseHeaders {
 		w.Header().Set(k, v)
 	}
@@ -97,7 +132,16 @@ func (rp *Replay) serveStreaming(w http.ResponseWriter, it *Interaction) {
 		if rp.PreserveStreamDelays && ev.DelayMs > 0 {
 			target := start.Add(time.Duration(ev.DelayMs) * time.Millisecond)
 			if d := time.Until(target); d > 0 {
-				time.Sleep(d)
+				// Honor the captured pacing, but bail out promptly if the client
+				// disconnects or the server shuts down (don't block for the full
+				// recorded delay).
+				timer := time.NewTimer(d)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 			}
 		}
 		if _, err := w.Write([]byte(ev.Data)); err != nil {

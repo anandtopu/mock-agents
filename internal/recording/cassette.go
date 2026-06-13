@@ -61,7 +61,10 @@ type Cassette struct {
 
 	mu           sync.RWMutex
 	interactions []*Interaction
-	byHash       map[string]*Interaction
+	// byHash indexes interactions by request hash, in insertion order. A hash
+	// can map to MULTIPLE interactions (a multi-turn loop replays them in
+	// sequence — R-04); single-interaction hashes keep a one-element slice.
+	byHash map[string][]*Interaction
 }
 
 // New creates an empty in-memory cassette. Path may be empty if the
@@ -69,7 +72,7 @@ type Cassette struct {
 func New(path string) *Cassette {
 	return &Cassette{
 		Path:   path,
-		byHash: make(map[string]*Interaction),
+		byHash: make(map[string][]*Interaction),
 	}
 }
 
@@ -99,7 +102,7 @@ func Load(path string) (*Cassette, error) {
 			return nil, fmt.Errorf("parsing cassette line: %w", err)
 		}
 		c.interactions = append(c.interactions, &it)
-		c.byHash[it.Hash] = &it
+		c.byHash[it.Hash] = append(c.byHash[it.Hash], c.interactions[len(c.interactions)-1])
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("reading cassette: %w", err)
@@ -126,7 +129,7 @@ func (c *Cassette) Append(it *Interaction) error {
 
 	c.mu.Lock()
 	c.interactions = append(c.interactions, it)
-	c.byHash[it.Hash] = it
+	c.byHash[it.Hash] = append(c.byHash[it.Hash], it)
 	snapshot := append([]*Interaction(nil), c.interactions...)
 	c.mu.Unlock()
 
@@ -136,11 +139,32 @@ func (c *Cassette) Append(it *Interaction) error {
 	return writeCassette(c.Path, snapshot)
 }
 
-// Lookup returns the interaction matching the given request hash, or nil.
+// Lookup returns the FIRST interaction recorded for the given request hash, or
+// nil. (For multi-turn sequenced replay use LookupSequence.)
 func (c *Cassette) Lookup(hash string) *Interaction {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.byHash[hash]
+	if s := c.byHash[hash]; len(s) > 0 {
+		return s[0]
+	}
+	return nil
+}
+
+// LookupSequence returns the interactions recorded for the given hash, in
+// insertion order (nil when none). The returned SLICE is independent
+// (reassigning its elements does not affect the cassette), but the *Interaction
+// values are SHARED with the cassette and must be treated as READ-ONLY — they
+// are written once at record time and only read on replay.
+func (c *Cassette) LookupSequence(hash string) []*Interaction {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	s := c.byHash[hash]
+	if len(s) == 0 {
+		return nil
+	}
+	out := make([]*Interaction, len(s))
+	copy(out, s)
+	return out
 }
 
 // All returns a copy of the interactions in insertion order.
