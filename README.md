@@ -66,6 +66,9 @@ mockagents start                              # prints your base URL + a ready-t
 - **Structured outputs** (`response_format`) — `json_schema` strict mode returns
   schema-conforming JSON your SDK `.parse()` (Pydantic/Zod) round-trips,
   synthesized from the request schema; `json_object` mode + a refusal path too.
+- **Moderations** (`/v1/moderations`) — deterministic omni-moderation responses
+  (`flagged` + 13 category scores) for testing guardrail pipelines offline:
+  known-harmful phrases flag the right category, benign text stays clean.
 - **Mocks MCP servers too** — test agents that call Model Context Protocol
   servers, deterministically (JSON-RPC 2.0 + bidirectional SSE).
 - **Scenario matching** — route by message content, regex, or turn number;

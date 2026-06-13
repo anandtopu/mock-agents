@@ -11,6 +11,16 @@ internal **v0.1 → v0.2 → v0.3** development milestones. All three are on `ma
 ## [Unreleased]
 
 ### Added
+- **OpenAI Moderations API** (A-07) — a new `POST /v1/moderations` surface
+  (omni-moderation shape) for testing guardrail pipelines offline. Returns
+  `flagged` + the full set of 13 category booleans, `category_scores`, and
+  `category_applied_input_types`, **deterministically**: a keyword→category map
+  flags known-harmful phrases (with word-boundary matching, so "skill" doesn't
+  trip "kill") at a high score while benign text stays low, over an FNV-seeded
+  per-category baseline so scores are realistic and stable across runs. Accepts
+  `input` as a string, string array, or content parts; one result per input.
+  Zero-config (no agent definition); engine-free like `/v1/embeddings`. Free on
+  the real API, so it is deliberately excluded from quota/cost accounting.
 - **OpenAI structured outputs / `response_format`** (A-03) — Chat Completions
   now honors `response_format`. With `{type:"json_schema", json_schema:{schema,
   strict}}` the mock returns assistant `content` that is a JSON string

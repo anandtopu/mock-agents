@@ -549,7 +549,10 @@ func isLoggablePath(path string) bool {
 	// with the quota middleware (isLLMProviderPath) so logging and quota never
 	// disagree about which routes count. /v1/engines/process is an internal engine
 	// endpoint that isn't a public provider surface but is still logged.
-	return path == "/v1/engines/process" || isLLMProviderPath(path)
+	// /v1/moderations is logged but deliberately NOT in isLLMProviderPath: it is
+	// free (no tokens/spend) so it is excluded from quota/billing, but its calls
+	// still belong in the logs/dashboard/audit.
+	return path == "/v1/engines/process" || path == "/v1/moderations" || isLLMProviderPath(path)
 }
 
 // captureWriter wraps ResponseWriter to capture the status code and,
