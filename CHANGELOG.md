@@ -11,6 +11,27 @@ internal **v0.1 → v0.2 → v0.3** development milestones. All three are on `ma
 ## [Unreleased]
 
 ### Added
+- **Configurable replay matchers + miss diagnostics** (R-02) — two independent
+  improvements to `mockagents replay`:
+  - **`--match-ignore <field>`** (repeatable) makes matching ignore the named
+    top-level request-body fields, so a request that differs from the recorded
+    interaction only in `temperature`, `seed`, `stream`, `metadata` (or any field
+    you name) still hits the cassette. Ignoring is **replay-time only** — the
+    cassette on disk and each interaction's stored hash are unchanged. Exact-hash
+    matching stays the default; the flag derives a separate "match key" (ignored
+    fields stripped, then hashed) via a lazily-built secondary index, and
+    sequenced playback (R-04) is preserved. (`internal/recording/matcher.go`;
+    `Replay.Matcher`.)
+  - **Structured miss diagnostics** — a 404 replay miss now returns a JSON body
+    (`Content-Type: application/json`) with the request hash and a `nearest`
+    block: the closest recorded interaction **on the same method+path**, scored by
+    top-level field overlap, plus a field-level `diff` listing `changed` /
+    `missing_in_request` / `extra_in_request` entries (grouped, alphabetical,
+    bounded to 25 with values truncated to 200 bytes). A drifted prompt now names
+    the field that changed instead of returning an opaque hash. The diff's notion
+    of equality matches the matcher (float64 numbers, so `1` and `1.0` are equal),
+    and the `Fallback` path is unchanged — diagnostics only fire when no
+    `Fallback` is set. (`internal/recording/diagnostics.go`.)
 - **Cassette redaction** (R-03) — `mockagents record` gains `--redact` and
   `--redact-pattern <regexp>` (repeatable; implies `--redact`) so secrets are
   masked **before** the interaction is written to the cassette, making recorded

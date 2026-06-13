@@ -63,8 +63,49 @@ mockagents replay --cassette fixtures/checkout-flow.jsonl
 ```
 
 Request matching canonicalizes JSON (sorted keys), so SDK field reordering still
-hits the cassette. An unknown request during replay returns `404` with the
-SHA-256 prefix of the miss, so you can see exactly what wasn't recorded.
+hits the cassette. An unknown request during replay returns a `404` whose JSON
+body tells you what drifted, instead of just a hash:
+
+```json
+{
+  "error": "no cassette match",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "hash": "3f2a91bc04e7",
+  "nearest": {
+    "hash": "7a1c3e9f2b05",
+    "similarity": 0.75,
+    "diff": [
+      {"field": "messages", "kind": "changed",
+       "cassette_value": "...", "request_value": "..."}
+    ]
+  }
+}
+```
+
+`nearest` is the closest recorded interaction **on the same method+path**, scored
+by top-level field overlap; the `diff` lists `changed` / `missing_in_request` /
+`extra_in_request` fields (bounded, with long values truncated). A drifted prompt
+now points you straight at the field that changed.
+
+### Ignore replay-time fields
+
+SDKs and frameworks often inject sampling fields (`temperature`, `seed`,
+`stream`, `metadata`) that weren't in the recorded request, or vary them per run.
+Use `--match-ignore` (repeatable) to ignore those top-level fields when matching:
+
+```bash
+mockagents replay \
+  --cassette fixtures/checkout-flow.jsonl \
+  --match-ignore temperature \
+  --match-ignore seed \
+  --match-ignore stream
+```
+
+Ignored fields are **replay-time only** — the cassette on disk and each stored
+hash are unchanged, and exact-hash matching stays the default when no
+`--match-ignore` is given. Sequenced playback (the Nth request → the Nth recorded
+response) is preserved across ignored-field differences.
 
 ## 3. Graduate to YAML for what you can't record
 

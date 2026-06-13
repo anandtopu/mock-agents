@@ -236,7 +236,17 @@ mockagents record --upstream https://api.openai.com \
 
 # Replay the cassette over the mock endpoints (no upstream, no keys)
 mockagents replay --cassette fixtures/gpt4o.jsonl
+
+# Ignore replay-time sampling fields when matching (repeatable)
+mockagents replay --cassette fixtures/gpt4o.jsonl \
+  --match-ignore temperature --match-ignore seed
 ```
+
+`--match-ignore <field>` makes matching ignore the named top-level request-body
+fields (replay-time only; the cassette is unchanged). A replay miss returns a
+JSON `404` with the request hash and a `nearest` block — the closest recorded
+interaction on the same method+path plus a field-level diff — so a drifted
+prompt names what changed instead of returning an opaque hash.
 
 Provider keys stay on your machine — they are never written to the cassette.
 SSE streams are captured and replayed.

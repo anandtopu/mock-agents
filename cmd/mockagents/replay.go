@@ -24,13 +24,15 @@ Requests that don't match any recorded interaction return 404 by default.`,
 }
 
 var (
-	replayCassette string
-	replayPort     int
+	replayCassette    string
+	replayPort        int
+	replayMatchIgnore []string
 )
 
 func init() {
 	replayCmd.Flags().StringVar(&replayCassette, "cassette", "cassette.jsonl", "Path to the cassette file to load")
 	replayCmd.Flags().IntVarP(&replayPort, "port", "p", 8080, "Port to listen on")
+	replayCmd.Flags().StringArrayVar(&replayMatchIgnore, "match-ignore", nil, "Top-level request body field to ignore when matching (repeatable, e.g. --match-ignore temperature --match-ignore seed). Replay-time only; the cassette is unchanged")
 	rootCmd.AddCommand(replayCmd)
 }
 
@@ -44,6 +46,10 @@ func runReplay(cmd *cobra.Command, args []string) error {
 	}
 
 	rp := recording.NewReplay(cass)
+	if len(replayMatchIgnore) > 0 {
+		rp.Matcher = recording.NewMatcher(replayMatchIgnore)
+		fmt.Printf("mockagents replay: match-ignore=%v (%d field(s))\n", replayMatchIgnore, len(replayMatchIgnore))
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/v1/chat/completions", rp)

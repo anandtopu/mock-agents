@@ -3,7 +3,6 @@ package recording
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -24,13 +23,25 @@ type Replay struct {
 	// for demos where realistic pacing matters.
 	PreserveStreamDelays bool
 
-	// cursor tracks the per-hash replay position so a multi-turn loop that
+	// Matcher, when set and active, relaxes matching by ignoring a set of
+	// top-level request body fields (R-02). Requests are then looked up by a
+	// "match key" (ignored-fields stripped, then hashed) via a lazily-built
+	// secondary index over the cassette. Nil/inactive ⇒ exact-hash matching.
+	Matcher *Matcher
+
+	// cursor tracks the per-key replay position so a multi-turn loop that
 	// repeats the same request gets the recorded interactions in sequence
 	// (R-04). Past the end of a sequence the last interaction repeats. Guarded
 	// by mu. One Replay instance serves all requests, so the cursor persists
 	// across the loop.
 	mu     sync.Mutex
 	cursor map[string]int
+
+	// byMatchKey is the secondary index used when Matcher is active: match key
+	// → interactions in insertion order (same semantics as Cassette.byHash).
+	// Built once by matchOnce from a static cassette, then read-only.
+	matchOnce  sync.Once
+	byMatchKey map[string][]*Interaction
 }
 
 // NewReplay builds a Replay handler.
@@ -43,7 +54,19 @@ func NewReplay(c *Cassette) *Replay {
 // interaction; requests past the end repeat the last one. Returns nil when the
 // hash has no recorded interactions.
 func (rp *Replay) next(hash string) *Interaction {
-	seq := rp.Cassette.LookupSequence(hash)
+	return rp.advance(hash, rp.Cassette.LookupSequence(hash))
+}
+
+// nextFromMatchIndex is the matcher-active counterpart of next: it looks the
+// request up by match key in the lazily-built secondary index, advancing the
+// per-key cursor with the same sequence/repeat-last semantics.
+func (rp *Replay) nextFromMatchIndex(key string) *Interaction {
+	rp.matchOnce.Do(rp.buildMatchIndex)
+	return rp.advance(key, rp.byMatchKey[key])
+}
+
+// advance applies the shared R-04 cursor logic to a resolved sequence.
+func (rp *Replay) advance(key string, seq []*Interaction) *Interaction {
 	if len(seq) == 0 {
 		return nil
 	}
@@ -53,14 +76,26 @@ func (rp *Replay) next(hash string) *Interaction {
 		// usable, like before R-04 added the cursor).
 		rp.cursor = make(map[string]int)
 	}
-	idx := rp.cursor[hash]
+	idx := rp.cursor[key]
 	if idx >= len(seq) {
 		idx = len(seq) - 1 // repeat-last
 	} else {
-		rp.cursor[hash] = idx + 1
+		rp.cursor[key] = idx + 1
 	}
 	rp.mu.Unlock()
 	return seq[idx]
+}
+
+// buildMatchIndex populates byMatchKey from the (static) cassette, keying each
+// interaction by its match key so ignored-field-only differences collapse to the
+// same key. Insertion order is preserved so R-04 sequencing still works. Run
+// once via matchOnce.
+func (rp *Replay) buildMatchIndex() {
+	rp.byMatchKey = make(map[string][]*Interaction)
+	for _, it := range rp.Cassette.All() {
+		key := rp.Matcher.Key(it.Method, it.Path, it.RequestBody)
+		rp.byMatchKey[key] = append(rp.byMatchKey[key], it)
+	}
 }
 
 // ServeHTTP looks up the incoming request in the cassette and, on a hit,
@@ -72,8 +107,15 @@ func (rp *Replay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The full-body hash is always computed: it keys the exact-match path and is
+	// echoed in the miss diagnostics regardless of which matching mode is used.
 	hash := HashRequest(r.Method, r.URL.Path, body)
-	it := rp.next(hash)
+	var it *Interaction
+	if rp.Matcher.active() {
+		it = rp.nextFromMatchIndex(rp.Matcher.Key(r.Method, r.URL.Path, body))
+	} else {
+		it = rp.next(hash)
+	}
 	if it == nil {
 		if rp.Fallback != nil {
 			// Reset the body so the fallback can read it.
@@ -81,9 +123,7 @@ func (rp *Replay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			rp.Fallback.ServeHTTP(w, r)
 			return
 		}
-		http.Error(w,
-			fmt.Sprintf("no cassette match for %s %s (hash=%s)", r.Method, r.URL.Path, hash[:12]),
-			http.StatusNotFound)
+		rp.serveMissDiagnostics(w, r.Method, r.URL.Path, hash, body)
 		return
 	}
 
